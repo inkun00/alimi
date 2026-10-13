@@ -1,0 +1,103 @@
+School Alimi - Third-Party Notices and Source Information
+=======================================================
+
+School Alimi application source is distributed under GNU GPL version 3.
+The full license is included in the root LICENSE file. Corresponding application
+source and build instructions are distributed together with the executable.
+
+Third-party code and models retain their original copyright and license terms.
+Full installed-package license texts are collected under assets/licenses/;
+OCR model and runtime notices are also collected under assets/ocr/.
+assets/licenses/manifest.json records the versions and official project URLs of
+the installed dependencies used for this build. Build tools listed there may
+not themselves be contained in the running executable.
+
+User documents, uploaded images, stored schedules and other user data are not
+covered by the application source license.
+
+Runtime and UI
+--------------
+CPython 3.13.5 - Python Software Foundation License, with historical notices.
+  License: assets/licenses/Python_PSF.txt
+  Source: https://www.python.org/downloads/release/python-3135/
+  https://github.com/python/cpython/tree/v3.13.5
+
+PyQt5 5.15.11 - GNU GPL version 3.
+  Copyright Riverbank Computing Limited.
+  License: assets/licenses/PyQt5/LICENSE
+  Source: https://pypi.org/project/PyQt5/5.15.11/#files
+  https://www.riverbankcomputing.com/software/pyqt/download
+
+Qt 5.15.2 (PyQt5-Qt5 wheel) - GNU LGPL version 3.
+  Copyright The Qt Company Ltd. and other contributors.
+  License: assets/licenses/PyQt5-Qt5/LICENSE
+  LGPL text: assets/licenses/Qt_LGPL-3.0.txt
+  Source archive: https://download.qt.io/archive/qt/5.15/5.15.2/single/
+  https://code.qt.io/cgit/qt/qtbase.git/tree/?h=v5.15.2
+  Qt libraries are dynamically loaded. The distribution permits users to
+  replace compatible Qt shared libraries, rebuild the application, and debug
+  modifications to the Qt libraries. No additional application restriction is
+  intended to prevent exercise of the rights granted by the LGPL.
+
+PyQt5-sip 12.18.0 - BSD-2-Clause.
+  License: assets/licenses/PyQt5-sip/licenses/LICENSE
+  Source: https://pypi.org/project/PyQt5-sip/12.18.0/#files
+
+PyInstaller 6.19.0 - GPL-2.0-or-later with bootloader distribution exception.
+  The exception permits generated programs to be distributed under their own
+  applicable licenses; use of PyInstaller alone does not license user documents.
+  License and complete exception: assets/licenses/PyInstaller/licenses/COPYING.txt
+  Source: https://github.com/pyinstaller/pyinstaller/tree/v6.19.0
+
+Document support
+----------------
+python-docx 1.2.0 - MIT.
+  Source: https://github.com/python-openxml/python-docx
+openpyxl 3.1.5 - MIT.
+  Source: https://pypi.org/project/openpyxl/3.1.5/#files
+pdfplumber 0.11.9 - MIT.
+  Source: https://github.com/jsvine/pdfplumber
+pdfminer.six 20251230 - MIT.
+  Source: https://github.com/pdfminer/pdfminer.six
+pypdfium2 5.4.0 - BSD-3-Clause / Apache-2.0 and bundled dependency licenses.
+  Source: https://github.com/pypdfium2-team/pypdfium2
+  All installed PDFium build notices, including font/image/Unicode dependency
+  notices, are retained under assets/licenses/pypdfium2/.
+olefile 0.47 - BSD.
+  Source: https://github.com/decalage2/olefile
+cryptography 46.0.5 - Apache-2.0 OR BSD-3-Clause.
+  Source: https://github.com/pyca/cryptography
+cffi 2.0.0 - MIT.
+  Source: https://foss.heptapod.net/pypy/cffi
+lxml 6.1.3 - BSD-3-Clause, with additional libxml2/libxslt notices.
+  Source: https://github.com/lxml/lxml
+et-xmlfile 2.0.0 - MIT and Python license notices.
+  Source: https://pypi.org/project/et-xmlfile/2.0.0/#files
+charset-normalizer 3.4.4 - MIT.
+  Source: https://github.com/jawah/charset_normalizer
+pycparser - BSD-3-Clause.
+  Source: https://github.com/eliben/pycparser
+
+Offline OCR
+-----------
+PaddleOCR PP-OCRv5 models and RapidAI ONNX conversion - Apache-2.0.
+  Details, original download URLs and SHA256 hashes: assets/ocr/NOTICE.txt and
+  assets/ocr/models.json. The Korean character dictionary is embedded in ONNX.
+ONNX Runtime 1.27.0 - MIT, with included third-party notices.
+  Source: https://github.com/microsoft/onnxruntime
+NumPy 2.3.0 - BSD-3-Clause, with bundled native dependency notices.
+  Source: https://github.com/numpy/numpy/tree/v2.3.0
+OpenCV Python 4.13.0.92 - Apache-2.0 and bundled third-party licenses.
+  Source: https://github.com/opencv/opencv-python
+Pillow 12.3.0 - HPND, with complete upstream notice.
+  Source: https://github.com/python-pillow/Pillow
+
+Packaging dependencies
+----------------------
+packaging (Apache-2.0 OR BSD-2-Clause), setuptools (MIT and vendor notices),
+altgraph (MIT), pywin32-ctypes (BSD-3-Clause), pyinstaller-hooks-contrib
+(retained upstream licensing and exceptions) are recorded in the manifest and
+their complete notices are included under assets/licenses/.
+
+For each dependency, the full upstream license file takes precedence over this
+short index. This distribution includes no proprietary fonts from the build PC.

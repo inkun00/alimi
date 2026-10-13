@@ -1,0 +1,30 @@
+Alimi offline Korean OCR model notice
+====================================
+
+Models: PP-OCRv5 mobile text detector and Korean text recognizer.
+Original model authors: PaddlePaddle / PaddleOCR contributors.
+Official ONNX conversion/distribution: RapidAI / RapidOCR contributors.
+License: Apache License, Version 2.0 (included in PADDLEOCR_LICENSE.txt and
+RAPIDOCR_LICENSE.txt). The converted models retain their upstream license.
+
+Official project sources:
+https://github.com/PaddlePaddle/PaddleOCR
+https://github.com/RapidAI/RapidOCR
+https://github.com/RapidAI/RapidOCR/blob/main/python/rapidocr/default_models.yaml
+https://rapidai.github.io/RapidOCRDocs/main/en/model_list/
+
+Pinned official distribution URLs and SHA256 hashes are recorded in models.json
+and scripts/fetch_ocr_models.py. The recognition dictionary is embedded in the
+ONNX model's character metadata. No external character dictionary is required.
+
+Alimi uses an independently implemented CPU inference adapter with the published
+preprocessing / CTC decoding contract. DB postprocessing approximates the text
+polygon expansion with an expanded minimum-area rectangle. There is no automatic
+model download and no OCR network call in the running application.
+
+ONNX Runtime: MIT License, https://github.com/microsoft/onnxruntime
+NumPy: BSD-3-Clause, https://github.com/numpy/numpy
+OpenCV: Apache-2.0, https://github.com/opencv/opencv
+Pillow: HPND, https://github.com/python-pillow/Pillow
+
+Full dependency license notices are included by the application packager.

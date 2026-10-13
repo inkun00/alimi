@@ -1,0 +1,5 @@
+# Only the developer installs these. The Windows EXE bundles them and models.
+onnxruntime==1.27.0
+numpy==2.3.0
+opencv-python==4.13.0.92
+Pillow==12.3.0

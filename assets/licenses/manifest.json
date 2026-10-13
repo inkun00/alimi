@@ -1,0 +1,279 @@
+[
+  {
+    "package": "PyQt5",
+    "version": "5.15.11",
+    "license": "GPL v3",
+    "notice_files": 1,
+    "project_urls": [
+      "homepage, https://www.riverbankcomputing.com/software/pyqt/"
+    ],
+    "home_page": "",
+    "license_source": "https://pypi.org/project/PyQt5/5.15.11/#files (official source archive LICENSE)"
+  },
+  {
+    "package": "PyQt5-Qt5",
+    "version": "5.15.2",
+    "license": "LGPL v3",
+    "notice_files": 1,
+    "project_urls": [],
+    "home_page": "https://www.riverbankcomputing.com/software/pyqt/"
+  },
+  {
+    "package": "PyQt5-sip",
+    "version": "12.18.0",
+    "license": "BSD-2-Clause",
+    "notice_files": 1,
+    "project_urls": [],
+    "home_page": "https://github.com/Python-SIP/sip"
+  },
+  {
+    "package": "PyInstaller",
+    "version": "6.19.0",
+    "license": "GPLv2-or-later with a special exception which allows to use PyInstaller to build and distribute non-free programs (including commercial ones)",
+    "notice_files": 1,
+    "project_urls": [
+      "Homepage, https://pyinstaller.org",
+      "Documentation, https://pyinstaller.org",
+      "Source Code, https://github.com/pyinstaller/pyinstaller",
+      "Release Notes, https://pyinstaller.org/en/stable/CHANGES.html"
+    ],
+    "home_page": ""
+  },
+  {
+    "package": "python-docx",
+    "version": "1.2.0",
+    "license": "MIT",
+    "notice_files": 1,
+    "project_urls": [
+      "Changelog, https://github.com/python-openxml/python-docx/blob/master/HISTORY.rst",
+      "Documentation, https://python-docx.readthedocs.org/en/latest/",
+      "Homepage, https://github.com/python-openxml/python-docx",
+      "Repository, https://github.com/python-openxml/python-docx"
+    ],
+    "home_page": ""
+  },
+  {
+    "package": "openpyxl",
+    "version": "3.1.5",
+    "license": "MIT",
+    "notice_files": 1,
+    "project_urls": [
+      "Documentation, https://openpyxl.readthedocs.io/en/stable/",
+      "Source, https://foss.heptapod.net/openpyxl/openpyxl",
+      "Tracker, https://foss.heptapod.net/openpyxl/openpyxl/-/issues"
+    ],
+    "home_page": "https://openpyxl.readthedocs.io"
+  },
+  {
+    "package": "pdfplumber",
+    "version": "0.11.9",
+    "license": "",
+    "notice_files": 1,
+    "project_urls": [],
+    "home_page": "https://github.com/jsvine/pdfplumber"
+  },
+  {
+    "package": "pdfminer.six",
+    "version": "20251230",
+    "license": "MIT",
+    "notice_files": 1,
+    "project_urls": [
+      "Homepage, https://github.com/pdfminer/pdfminer.six"
+    ],
+    "home_page": ""
+  },
+  {
+    "package": "pypdfium2",
+    "version": "5.4.0",
+    "license": "BSD-3-Clause, Apache-2.0, dependency licenses",
+    "notice_files": 19,
+    "project_urls": [
+      "Source, https://github.com/pypdfium2-team/pypdfium2",
+      "Tracker, https://github.com/pypdfium2-team/pypdfium2/issues",
+      "Documentation, https://pypdfium2.readthedocs.io",
+      "Changelog, https://pypdfium2.readthedocs.io/en/stable/changelog.html"
+    ],
+    "home_page": "https://github.com/pypdfium2-team/pypdfium2"
+  },
+  {
+    "package": "olefile",
+    "version": "0.47",
+    "license": "BSD",
+    "notice_files": 4,
+    "project_urls": [],
+    "home_page": "https://www.decalage.info/python/olefileio"
+  },
+  {
+    "package": "cryptography",
+    "version": "46.0.5",
+    "license": "Apache-2.0 OR BSD-3-Clause",
+    "notice_files": 3,
+    "project_urls": [
+      "homepage, https://github.com/pyca/cryptography",
+      "documentation, https://cryptography.io/",
+      "source, https://github.com/pyca/cryptography/",
+      "issues, https://github.com/pyca/cryptography/issues",
+      "changelog, https://cryptography.io/en/latest/changelog/"
+    ],
+    "home_page": ""
+  },
+  {
+    "package": "cffi",
+    "version": "2.0.0",
+    "license": "MIT",
+    "notice_files": 2,
+    "project_urls": [
+      "Documentation, https://cffi.readthedocs.io/",
+      "Changelog, https://cffi.readthedocs.io/en/latest/whatsnew.html",
+      "Downloads, https://github.com/python-cffi/cffi/releases",
+      "Contact, https://groups.google.com/forum/#!forum/python-cffi",
+      "Source Code, https://github.com/python-cffi/cffi",
+      "Issue Tracker, https://github.com/python-cffi/cffi/issues"
+    ],
+    "home_page": ""
+  },
+  {
+    "package": "charset-normalizer",
+    "version": "3.4.4",
+    "license": "MIT",
+    "notice_files": 1,
+    "project_urls": [
+      "Changelog, https://github.com/jawah/charset_normalizer/blob/master/CHANGELOG.md",
+      "Documentation, https://charset-normalizer.readthedocs.io/",
+      "Code, https://github.com/jawah/charset_normalizer",
+      "Issue tracker, https://github.com/jawah/charset_normalizer/issues"
+    ],
+    "home_page": ""
+  },
+  {
+    "package": "lxml",
+    "version": "6.1.3",
+    "license": "BSD-3-Clause",
+    "notice_files": 2,
+    "project_urls": [
+      "Source, https://github.com/lxml/lxml",
+      "Bug Tracker, https://bugs.launchpad.net/lxml"
+    ],
+    "home_page": "https://lxml.de/"
+  },
+  {
+    "package": "et-xmlfile",
+    "version": "2.0.0",
+    "license": "MIT",
+    "notice_files": 2,
+    "project_urls": [
+      "Documentation, https://openpyxl.pages.heptapod.net/et_xmlfile/",
+      "Source, https://foss.heptapod.net/openpyxl/et_xmlfile",
+      "Tracker, https://foss.heptapod.net/openpyxl/et_xmfile/-/issues"
+    ],
+    "home_page": "https://foss.heptapod.net/openpyxl/et_xmlfile"
+  },
+  {
+    "package": "packaging",
+    "version": "26.1",
+    "license": "Apache-2.0 OR BSD-2-Clause",
+    "notice_files": 3,
+    "project_urls": [
+      "Documentation, https://packaging.pypa.io/",
+      "Source, https://github.com/pypa/packaging"
+    ],
+    "home_page": ""
+  },
+  {
+    "package": "setuptools",
+    "version": "82.0.1",
+    "license": "MIT",
+    "notice_files": 17,
+    "project_urls": [
+      "Source, https://github.com/pypa/setuptools",
+      "Documentation, https://setuptools.pypa.io/",
+      "Changelog, https://setuptools.pypa.io/en/stable/history.html"
+    ],
+    "home_page": ""
+  },
+  {
+    "package": "altgraph",
+    "version": "0.17.5",
+    "license": "MIT",
+    "notice_files": 1,
+    "project_urls": [
+      "Documentation, https://altgraph.readthedocs.io/en/latest/",
+      "Issue tracker, https://github.com/ronaldoussoren/altgraph/issues",
+      "Repository, https://github.com/ronaldoussoren/altgraph"
+    ],
+    "home_page": "https://altgraph.readthedocs.io"
+  },
+  {
+    "package": "pywin32-ctypes",
+    "version": "0.2.3",
+    "license": "BSD-3-Clause",
+    "notice_files": 1,
+    "project_urls": [],
+    "home_page": "https://github.com/enthought/pywin32-ctypes"
+  },
+  {
+    "package": "pyinstaller-hooks-contrib",
+    "version": "2026.4",
+    "license": "",
+    "notice_files": 1,
+    "project_urls": [],
+    "home_page": "https://github.com/pyinstaller/pyinstaller-hooks-contrib"
+  },
+  {
+    "package": "pycparser",
+    "version": "3.0",
+    "license": "BSD-3-Clause",
+    "notice_files": 1,
+    "project_urls": [
+      "Homepage, https://github.com/eliben/pycparser"
+    ],
+    "home_page": ""
+  },
+  {
+    "package": "Pillow",
+    "version": "12.3.0",
+    "license": "MIT-CMU",
+    "notice_files": 1,
+    "project_urls": [
+      "Release notes, https://pillow.readthedocs.io/en/stable/releasenotes/index.html",
+      "Changelog, https://github.com/python-pillow/Pillow/releases",
+      "Documentation, https://pillow.readthedocs.io",
+      "Funding, https://tidelift.com/subscription/pkg/pypi-pillow?utm_source=pypi-pillow&utm_medium=pypi",
+      "Homepage, https://python-pillow.github.io",
+      "Mastodon, https://fosstodon.org/@pillow",
+      "Source, https://github.com/python-pillow/Pillow"
+    ],
+    "home_page": ""
+  },
+  {
+    "package": "numpy",
+    "version": "2.3.0",
+    "license": "Copyright (c) 2005-2025, NumPy Developers.  All rights reserved.   Redistribution and use in source and binary forms, with or without  modification, are permitted provided that the following conditions are  met:       * Redistributions of source code must retain the above copyright         notice, this list of conditions and the following disclaimer.       * Redistributions in binary form must reproduce the above         copyright notice, this list of conditions and the following         disclai",
+    "notice_files": 4,
+    "project_urls": [
+      "homepage, https://numpy.org",
+      "documentation, https://numpy.org/doc/",
+      "source, https://github.com/numpy/numpy",
+      "download, https://pypi.org/project/numpy/#files",
+      "tracker, https://github.com/numpy/numpy/issues",
+      "release notes, https://numpy.org/doc/stable/release"
+    ],
+    "home_page": ""
+  },
+  {
+    "package": "onnxruntime",
+    "version": "1.27.0",
+    "license": "MIT License",
+    "notice_files": 2,
+    "project_urls": [],
+    "home_page": "https://onnxruntime.ai"
+  },
+  {
+    "package": "opencv-python",
+    "version": "4.13.0.92",
+    "license": "Apache 2.0",
+    "notice_files": 4,
+    "project_urls": [],
+    "home_page": "https://github.com/opencv/opencv-python"
+  }
+]
