@@ -14,7 +14,7 @@ onnxruntime.disable_telemetry_events()
 
 from PyQt5.QtCore import QEvent, QPoint, Qt
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QMessageBox
 
 from alimi.core import Event
 from alimi.desktop import DesktopListWindow, NoteWindow, event_details, format_event_deadline
@@ -187,13 +187,29 @@ class DesktopReminderTests(unittest.TestCase):
             self.assertIn(1, layers, "The compact card returns to the desktop layer.")
             self.assertNotIn(-1, layers)
 
-    def test_both_reminder_modes_block_close_until_finish_or_shutdown(self):
+    def test_both_reminder_modes_confirm_close_without_completing(self):
         for window in (NoteWindow(self.event), DesktopListWindow([self.event])):
             self.show(window)
-            self.assertFalse(window.close())
+            dismissed, completed = [], []
+            window.dismissed_by_user.connect(lambda: dismissed.append(True))
+            window.completed.connect(completed.append)
+            self.assertTrue(window.close_button.isVisible())
+            with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Cancel) as warning:
+                window.close_button.click()
+                self.assertEqual(QMessageBox.Cancel, warning.call_args.args[-1])
             self.assertTrue(window.isVisible())
+            self.assertFalse(window.dismissed)
+            with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Ok):
+                window.close_button.click()
+            self.assertFalse(window.isVisible())
+            self.assertTrue(window.dismissed)
+            self.assertEqual([True], dismissed)
+            self.assertEqual([], completed)
+            window.show()
             self.app.setProperty("shutting_down", True)
-            self.assertTrue(window.close())
+            with patch("alimi.desktop.QMessageBox.warning") as warning:
+                self.assertTrue(window.close())
+                warning.assert_not_called()
             self.assertFalse(window.isVisible())
             self.app.setProperty("shutting_down", False)
 

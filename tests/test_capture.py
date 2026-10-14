@@ -2,6 +2,7 @@
 
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -12,7 +13,7 @@ onnxruntime.disable_telemetry_events()
 from PyQt5.QtCore import QEvent, QMimeData, QPoint, QPointF, Qt, QUrl
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QImage, QMouseEvent, QTextCursor
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QLabel
+from PyQt5.QtWidgets import QApplication, QLabel, QMessageBox
 
 from alimi.capture import CaptureNotepad
 
@@ -25,6 +26,10 @@ class DesktopCaptureTests(unittest.TestCase):
 
     def setUp(self):
         self.app.setProperty("shutting_down", False)
+        warning_patch = patch("alimi.desktop.QMessageBox.warning",
+                              return_value=QMessageBox.Cancel)
+        self.warning = warning_patch.start()
+        self.addCleanup(warning_patch.stop)
         self.window = CaptureNotepad("기존 메모")
         self.payloads = []
         self.drafts = []
@@ -47,15 +52,16 @@ class DesktopCaptureTests(unittest.TestCase):
         mime.setText(text)
         return mime
 
-    def test_notepad_is_independent_editable_and_uses_desktop_bottom_order(self):
+    def test_notepad_is_independent_editable_and_always_above_ordinary_windows(self):
         self.assertIsNone(self.window.parent())
         self.assertEqual("학교 알리미 · 일정 메모장", self.window.windowTitle())
-        self.assertTrue(self.window.windowFlags() & Qt.WindowStaysOnBottomHint)
-        self.assertFalse(self.window.windowFlags() & Qt.WindowStaysOnTopHint)
+        self.assertFalse(self.window.windowFlags() & Qt.WindowStaysOnBottomHint)
+        self.assertTrue(self.window.windowFlags() & Qt.WindowStaysOnTopHint)
         self.assertFalse(self.window.windowFlags() & Qt.WindowCloseButtonHint)
         self.assertFalse(self.window.editor.isReadOnly())
         self.assertFalse(self.window.close())
         self.assertTrue(self.window.isVisible())
+        self.warning.assert_called_once()
 
     def test_new_notepad_starts_as_visible_desktop_icon(self):
         window = CaptureNotepad("다음에도 남아야 할 초안")
@@ -63,7 +69,7 @@ class DesktopCaptureTests(unittest.TestCase):
             window.show()
             self.app.processEvents()
             self.assertTrue(window.collapsed)
-            self.assertEqual((72, 70), (window.width(), window.height()))
+            self.assertEqual((72, 96), (window.width(), window.height()))
             self.assertTrue(window.icon_button.isVisible())
             self.assertFalse(window.editor.isVisible())
             self.assertFalse(window.isMinimized())
@@ -72,19 +78,22 @@ class DesktopCaptureTests(unittest.TestCase):
         finally:
             window.finish()
 
-    def test_icon_has_only_paper_pixels_and_expanded_memo_is_opaque(self):
+    def test_icon_keeps_paper_hitbox_with_visible_close_button_and_opaque_memo(self):
         self.window.set_collapsed(True)
         self.app.processEvents()
         original_handle = int(self.window.winId())
         self.assertTrue(self.window.testAttribute(Qt.WA_TranslucentBackground))
         self.assertEqual("", self.window.icon_button.text())
         self.assertEqual([], self.window.compact_panel.findChildren(QLabel))
+        self.assertTrue(self.window.icon_close_button.isVisible())
+        self.assertFalse(self.window.close_button.isVisible())
         self.assertIn("일정 메모장", self.window.icon_button.accessibleName())
         self.assertIn("더블클릭", self.window.icon_button.toolTip())
         self.window.icon_button.setFocus()
         QTest.mouseMove(self.window.icon_button, QPoint(2, 2))
         self.app.processEvents()
-        compact = self.window.grab().toImage()
+        icon_origin = self.window.icon_button.mapTo(self.window, QPoint(0, 0))
+        compact = self.window.grab().toImage().copy(icon_origin.x(), icon_origin.y(), 72, 70)
         for x, y in ((0, 0), (2, 2), (71, 0), (0, 69), (71, 69), (35, 68)):
             self.assertEqual(0, compact.pixelColor(x, y).alpha(), (x, y))
         paper = compact.pixelColor(36, 22)
@@ -93,6 +102,8 @@ class DesktopCaptureTests(unittest.TestCase):
 
         self.window.expand_notepad()
         self.app.processEvents()
+        self.assertTrue(self.window.close_button.isVisible())
+        self.assertFalse(self.window.icon_close_button.isVisible())
         expanded = self.window.grab().toImage()
         self.assertEqual(original_handle, int(self.window.winId()))
         self.assertEqual(255, expanded.pixelColor(2, 2).alpha())
@@ -112,10 +123,11 @@ class DesktopCaptureTests(unittest.TestCase):
         try:
             self.app.setStyleSheet(STYLE)
             window = CaptureNotepad("배경 없이 전체 아이콘 표시")
-            self.assertEqual((72, 70), (window.width(), window.height()))
+            self.assertEqual((72, 96), (window.width(), window.height()))
             window.show()
             self.app.processEvents()
-            image = window.grab().toImage()
+            icon_origin = window.icon_button.mapTo(window, QPoint(0, 0))
+            image = window.grab().toImage().copy(icon_origin.x(), icon_origin.y(), 72, 70)
             self.assertEqual((72, 70), (image.width(), image.height()))
             opaque_points = [(x, y) for y in range(image.height()) for x in range(image.width())
                              if image.pixelColor(x, y).alpha()]
@@ -131,12 +143,76 @@ class DesktopCaptureTests(unittest.TestCase):
             self.app.processEvents()
             window.set_collapsed(True)
             self.app.processEvents()
-            self.assertEqual((72, 70), (window.width(), window.height()))
+            self.assertEqual((72, 96), (window.width(), window.height()))
             self.assertEqual((72, 70), (window.icon_button.width(), window.icon_button.height()))
+            self.assertTrue(window.icon_close_button.isVisible())
+            self.assertFalse(window.icon_close_button.geometry().intersects(window.icon_button.geometry()))
         finally:
             if window is not None:
                 window.finish()
             self.app.setStyleSheet(previous_style)
+
+    def test_topmost_refresh_preserves_handle_geometry_and_never_activates(self):
+        original_handle = int(self.window.winId())
+        geometry = self.window.geometry()
+        with patch("alimi.capture._native_windows_surface", return_value=True), \
+                patch("alimi.capture._native_is_topmost", side_effect=[False, True]) as is_topmost, \
+                patch("alimi.capture._native_set_z_order") as set_z_order, \
+                patch.object(self.window, "lower") as lower, \
+                patch.object(self.window, "raise_") as raise_window, \
+                patch.object(self.window, "activateWindow") as activate:
+            self.window.keep_below_windows()
+            self.window.keep_below_windows()
+            self.assertEqual(2, is_topmost.call_count)
+            set_z_order.assert_called_once_with(original_handle, -1)
+            lower.assert_not_called()
+            raise_window.assert_not_called()
+            activate.assert_not_called()
+        self.assertEqual(original_handle, int(self.window.winId()))
+        self.assertEqual(geometry, self.window.geometry())
+        for collapsed in (True, False, True):
+            self.window.set_collapsed(collapsed)
+            self.window.keep_below_windows()
+            self.assertEqual(original_handle, int(self.window.winId()))
+            self.assertTrue(self.window.windowHandle().flags() & Qt.WindowStaysOnTopHint)
+            self.assertFalse(self.window.windowHandle().flags() & Qt.WindowStaysOnBottomHint)
+
+    def test_each_close_button_warns_cancel_preserves_and_ok_dismisses(self):
+        dismissed = []
+        self.window.dismissed_by_user.connect(lambda: dismissed.append(True))
+        for collapsed in (True, False):
+            self.window.set_collapsed(collapsed)
+            button = self.window.icon_close_button if collapsed else self.window.close_button
+            self.assertTrue(button.isVisible())
+            self.assertEqual("닫기", button.accessibleName())
+            self.assertEqual("닫기", button.toolTip())
+            self.assertEqual((28, 26), (button.width(), button.height()))
+            self.warning.reset_mock()
+            button.click()
+            self.warning.assert_called_once()
+            self.assertEqual(QMessageBox.Cancel, self.warning.call_args.args[-1])
+            self.assertTrue(self.window.isVisible())
+            self.assertFalse(self.window.dismissed)
+            self.assertEqual("기존 메모", self.window.editor.toPlainText())
+            self.assertEqual([], dismissed)
+        self.warning.return_value = QMessageBox.Ok
+        self.window.close_button.click()
+        self.assertFalse(self.window.isVisible())
+        self.assertTrue(self.window.dismissed)
+        self.assertEqual([True], dismissed)
+        self.assertEqual("기존 메모", self.window.editor.toPlainText())
+
+    def test_programmatic_finish_never_prompts_or_marks_user_dismissal(self):
+        window = CaptureNotepad("종료할 때도 보존")
+        dismissed = []
+        window.dismissed_by_user.connect(lambda: dismissed.append(True))
+        window.show()
+        self.warning.reset_mock()
+        window.finish()
+        self.warning.assert_not_called()
+        self.assertFalse(window.isVisible())
+        self.assertFalse(window.dismissed)
+        self.assertEqual([], dismissed)
 
     def test_double_click_and_minimize_preserve_editor_cursor_and_undo(self):
         editor = self.window.editor

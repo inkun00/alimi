@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from calendar import monthrange
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +23,7 @@ from PyQt5.QtCore import QDate, QEvent, QRect, Qt, QTimer
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QDialog, QDialogButtonBox, QMessageBox
 
-from alimi.app import EventDialog, MainWindow, make_icon
+from alimi.app import EventDialog, MainWindow, TEST_NOTE_SOURCE, make_icon
 from alimi.core import Event, Store
 from alimi.urgency import event_urgency
 
@@ -960,7 +961,8 @@ class DesktopModeIntegrationTests(unittest.TestCase):
         self.assertTrue(capture.collapsed)
         initial = QRect(capture.geometry())
         self.window.show()
-        self.window.close()
+        with patch("alimi.app.QMessageBox.warning", return_value=QMessageBox.Ok):
+            self.window.close()
         self.pump()
         self.assertFalse(self.window.isVisible())
         for _ in range(3):
@@ -970,10 +972,192 @@ class DesktopModeIntegrationTests(unittest.TestCase):
             self.assertTrue(capture.collapsed)
             self.assertEqual(initial, capture.geometry())
             self.assertFalse(capture.editor.isVisible())
-        capture.close()
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Cancel):
+            capture.close()
         self.pump()
-        self.assertTrue(capture.isVisible(), "The desktop icon cannot be dismissed by closing it.")
+        self.assertTrue(capture.isVisible(), "Canceling the warning keeps the desktop icon visible.")
         self.assertTrue(capture.collapsed)
+
+    def test_manager_close_warning_can_cancel_or_hide_without_changing_schedules(self):
+        events = self.add_due(2)
+        before = self.store.list_events()
+        self.window.show()
+        with patch("alimi.app.QMessageBox.warning", return_value=QMessageBox.Cancel) as warning:
+            self.window.close()
+        self.pump()
+        self.assertTrue(self.window.isVisible())
+        self.assertEqual(QMessageBox.Ok | QMessageBox.Cancel, warning.call_args.args[-2])
+        self.assertEqual(QMessageBox.Cancel, warning.call_args.args[-1])
+        with patch("alimi.app.QMessageBox.warning", return_value=QMessageBox.Ok):
+            self.window.close()
+        self.pump()
+        self.assertFalse(self.window.isVisible())
+        self.assertTrue(self.window.capture_notepad.isVisible())
+        self.assertTrue(all(self.window.notes[event.id].isVisible() for event in events))
+        self.assertEqual(before, self.store.list_events())
+        self.window.show_manager()
+        self.pump()
+        self.assertTrue(self.window.isVisible())
+
+    def test_notepad_close_flushes_draft_stays_hidden_and_can_explicitly_reopen(self):
+        capture = self.window.capture_notepad
+        self.window.show_capture_notepad(expand=True)
+        capture.editor.setPlainText("2099년 10월 15일 닫아도 남아야 하는 초안")
+        draft = capture.editor.toPlainText()
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Cancel):
+            capture.close_button.click()
+        self.assertTrue(capture.isVisible())
+        self.assertFalse(capture.dismissed)
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Ok):
+            capture.close_button.click()
+        self.assertFalse(capture.isVisible())
+        self.assertTrue(capture.dismissed)
+        self.assertEqual(draft, self.store.get_setting("capture_draft"),
+                         "Confirmed close flushes the draft before the debounce timer fires.")
+        self.add_due(2)
+        for index in (1, 0, 1):
+            self.window.mode_combo.setCurrentIndex(index)
+            self.window.timer.timeout.emit()
+            self.pump()
+            self.assertFalse(capture.isVisible(), "Reminder refresh must respect a confirmed close.")
+        self.window.show_capture_notepad(expand=True)
+        self.pump()
+        self.assertTrue(capture.isVisible())
+        self.assertFalse(capture.dismissed)
+        self.assertFalse(capture.collapsed)
+        self.assertEqual(draft, capture.editor.toPlainText())
+        self.assertEqual(2, len(self.store.list_events()))
+
+    def test_closed_sticky_remains_unfinished_and_explicit_restore_reopens_it(self):
+        events = self.add_due(2)
+        closed, other = events
+        note = self.window.notes[closed.id]
+        # Repacking the remaining cards may persist a new display position.
+        # Every schedule field apart from those coordinates must be preserved.
+        before = [replace(event, x=None, y=None) for event in self.store.list_events()]
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Cancel):
+            note.close_button.click()
+        self.assertTrue(note.isVisible())
+        self.assertFalse(note.dismissed)
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Ok):
+            note.close_button.click()
+        selected = self.window.agenda.currentItem()
+        self.assertEqual(closed.id, selected.data(Qt.UserRole))
+        self.assertIn("바탕화면 도구 닫힘", selected.text())
+        self.assertIn("바탕화면 알림 다시 열기", self.window.note_reason.text())
+        self.assertNotIn("표시 기간 밖", self.window.note_reason.text())
+        self.pump()
+        self.assertTrue(sip.isdeleted(note) or not note.isVisible())
+        self.window.timer.timeout.emit()
+        self.pump()
+        closed_note = self.window.notes.get(closed.id)
+        self.assertTrue(closed_note is None or not closed_note.isVisible())
+        self.assertTrue(self.window.notes[other.id].isVisible())
+        desktop = self.switch_to_list()
+        self.assertEqual({closed.id, other.id}, set(desktop.events),
+                         "Closing a postit keeps its schedule available in the list.")
+        self.assertIn("알림 표시 중", self.window.agenda.currentItem().text())
+        self.window.mode_combo.setCurrentIndex(0)
+        self.pump()
+        closed_note = self.window.notes.get(closed.id)
+        self.assertTrue(closed_note is None or not closed_note.isVisible())
+        self.assertEqual(before, [replace(event, x=None, y=None) for event in self.store.list_events()])
+        self.window.restore_desktop_tools()
+        self.pump()
+        self.assertEqual({closed.id, other.id}, set(self.window.notes))
+        self.assertTrue(all(note.isVisible() for note in self.window.notes.values()))
+        self.assertIn("알림 표시 중", self.window.agenda.currentItem().text())
+        self.assertNotIn("바탕화면 알림 다시 열기", self.window.note_reason.text())
+        self.assertEqual(before, [replace(event, x=None, y=None) for event in self.store.list_events()])
+
+    def test_closed_list_stays_hidden_across_refresh_and_mode_switch_then_restores(self):
+        self.add_due(2)
+        desktop = self.switch_to_list()
+        before = self.store.list_events()
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Cancel):
+            desktop.close_button.click()
+        self.assertTrue(desktop.isVisible())
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Ok):
+            desktop.close_button.click()
+        self.assertTrue(all("바탕화면 도구 닫힘" in self.window.agenda.item(row).text()
+                            for row in range(self.window.agenda.count())))
+        self.assertIn("바탕화면 알림 다시 열기", self.window.note_reason.text())
+        self.pump()
+        self.assertTrue(sip.isdeleted(desktop) or not desktop.isVisible())
+        self.window.timer.timeout.emit()
+        self.pump()
+        self.assertTrue(self.window.desktop_list is None or not self.window.desktop_list.isVisible())
+        self.window.mode_combo.setCurrentIndex(0)
+        self.pump()
+        self.assertEqual(2, len(self.window.notes))
+        self.window.mode_combo.setCurrentIndex(1)
+        self.pump()
+        self.assertTrue(self.window.desktop_list is None or not self.window.desktop_list.isVisible())
+        self.assertEqual(before, self.store.list_events())
+        self.window.restore_desktop_tools()
+        self.pump()
+        self.assertTrue(self.window.desktop_list.isVisible())
+        self.assertEqual({event.id for event in before}, set(self.window.desktop_list.events))
+        self.assertTrue(all("알림 표시 중" in self.window.agenda.item(row).text()
+                            for row in range(self.window.agenda.count())))
+        self.assertEqual(before, self.store.list_events())
+
+    def test_test_postit_button_reopens_only_closed_test_after_switching_modes(self):
+        real = self.add_due()[0]
+        self.window.test_postit_button.click()
+        self.pump()
+        test_event = next(event for event in self.store.list_events() if event.source == TEST_NOTE_SOURCE)
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Ok):
+            self.window.notes[real.id].close_button.click()
+            self.window.notes[test_event.id].close_button.click()
+        self.window.mode_combo.setCurrentIndex(1)
+        self.window.mode_combo.setCurrentIndex(0)
+        self.pump()
+        self.assertNotIn(test_event.id, self.window.notes)
+        self.window.test_postit_button.click()
+        self.pump()
+        self.assertTrue(self.window.notes[test_event.id].isVisible())
+        self.assertFalse(self.window.notes[test_event.id].dismissed)
+        self.assertNotIn(test_event.id, self.window._dismissed_note_ids)
+        closed_real = self.window.notes.get(real.id)
+        self.assertTrue(closed_real is None or not closed_real.isVisible())
+        self.assertIn(real.id, self.window._dismissed_note_ids)
+        self.assertEqual(2, len(self.store.list_events()))
+        self.assertTrue(all(event.status == "open" for event in self.store.list_events()))
+
+    def test_test_postit_button_reopens_closed_list_and_completed_test_without_duplicates(self):
+        real = self.add_due()[0]
+        desktop = self.switch_to_list()
+        self.window.test_postit_button.click()
+        self.pump()
+        test_event = next(event for event in self.store.list_events() if event.source == TEST_NOTE_SOURCE)
+        self.window.complete_event(test_event.id)
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Ok):
+            desktop.close_button.click()
+        self.assertFalse(desktop.isVisible())
+        self.window.test_postit_button.click()
+        self.pump()
+        self.assertIs(desktop, self.window.desktop_list)
+        self.assertTrue(desktop.isVisible())
+        self.assertFalse(desktop.dismissed)
+        self.assertFalse(self.window._desktop_list_dismissed)
+        self.assertEqual({real.id, test_event.id}, set(desktop.events))
+        self.assertEqual("open", self.store.get_event(test_event.id).status)
+        self.assertEqual(2, len(self.store.list_events()))
+
+    def test_notepad_icon_and_editor_keep_top_layer_during_modes_and_refresh(self):
+        self.add_due(2)
+        capture = self.window.capture_notepad
+        for collapsed in (True, False):
+            capture.set_collapsed(collapsed)
+            for index in (1, 0):
+                self.window.mode_combo.setCurrentIndex(index)
+                self.window.timer.timeout.emit()
+                self.pump()
+                self.assertTrue(capture.isVisible())
+                self.assertEqual(collapsed, capture.collapsed)
+                self.assertTrue(capture.windowHandle().flags() & Qt.WindowStaysOnTopHint)
+                self.assertFalse(capture.windowHandle().flags() & Qt.WindowStaysOnBottomHint)
 
     def test_apply_alignment_button_restores_the_last_selected_edge_after_a_drag(self):
         area = QRect(100, 50, 1920, 1080)
@@ -1007,13 +1191,15 @@ class DesktopModeIntegrationTests(unittest.TestCase):
         self.assertFalse(note.complete_button.isVisible())
         self.assertIn(event.title, note.title_label.toolTip())
         self.window.show()
-        self.window.close()
+        with patch("alimi.app.QMessageBox.warning", return_value=QMessageBox.Ok):
+            self.window.close()
         self.pump()
         self.assertFalse(self.window.isVisible())
         self.assertTrue(note.isVisible())
-        note.close()
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Cancel):
+            note.close()
         self.pump()
-        self.assertTrue(note.isVisible(), "Uncompleted desktop reminders must not close.")
+        self.assertTrue(note.isVisible(), "Canceling the warning leaves the reminder visible.")
         QTest.mouseClick(note.title_label, Qt.LeftButton)
         self.pump()
         self.assertTrue(note.expanded)
@@ -1095,10 +1281,12 @@ class DesktopModeIntegrationTests(unittest.TestCase):
         self.assertEqual(monthly.id, desktop.selected_event_id)
         self.assertTrue(desktop.expanded)
         self.window.show()
-        self.window.close()
+        with patch("alimi.app.QMessageBox.warning", return_value=QMessageBox.Ok):
+            self.window.close()
         self.pump()
         self.assertTrue(desktop.isVisible())
-        desktop.close()
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Cancel):
+            desktop.close()
         self.pump()
         self.assertTrue(desktop.isVisible())
         desktop.complete_button.click()

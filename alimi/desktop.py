@@ -11,7 +11,7 @@ from PyQt5.QtCore import QEvent, QSignalBlocker, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QFontMetrics, QPen
 from PyQt5.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QPushButton, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
+    QMessageBox, QPushButton, QScrollArea, QSizePolicy, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QVBoxLayout, QWidget,
 )
 
@@ -27,6 +27,8 @@ QLabel { color: #493e1e; background: transparent; border: none; }
 QPushButton { background: transparent; color: #493e1e; border: none;
   border-radius: 4px; padding: 6px; text-align: left; }
 QPushButton:hover, QPushButton:focus { background: #f3df8d; }
+QPushButton#closeTool { padding: 0; text-align: center; font-size: 18px; }
+QPushButton#closeTool:hover { background: #f6c0ac; }
 QPushButton#completeButton { background: #4c4124; color: #fff4c8;
   padding: 8px; text-align: center; min-height: 24px; }
 QPushButton#completeButton:hover { background: #655831; }
@@ -217,11 +219,15 @@ class _UrgencyListDelegate(QStyledItemDelegate):
 
 
 class _BottomWindow(QWidget):
-    """No owner or close button; the default layer is below ordinary windows."""
+    """Independent tool with confirmed dismissal and a desktop default layer."""
+
+    dismissed_by_user = pyqtSignal()
 
     def __init__(self):
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnBottomHint)
         self.allow_close = False
+        self.dismissed = False
+        self._confirming_close = False
         self.drag_offset = None
         self._lowering = False
         self._lower_pending = False
@@ -271,6 +277,18 @@ class _BottomWindow(QWidget):
         handle.installEventFilter(self)
         return handle
 
+    def _make_close_button(self, parent=None):
+        button = QPushButton("×", parent)
+        button.setObjectName("closeTool")
+        button.setFixedSize(28, 26)
+        button.setAccessibleName("닫기")
+        button.setToolTip("닫기")
+        button.clicked.connect(self.close)
+        return button
+
+    def close_warning_text(self):
+        return "이 도구를 닫을까요?\n저장된 일정은 유지됩니다. 트레이에서 다시 열 수 있습니다."
+
     def eventFilter(self, obj, event):
         if obj is getattr(self, "handle", None):
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
@@ -289,6 +307,22 @@ class _BottomWindow(QWidget):
     def closeEvent(self, event):
         application = QApplication.instance()
         if self.allow_close or (application and application.property("shutting_down")):
+            event.accept()
+            return
+        if self._confirming_close:
+            event.ignore()
+            return
+        self._confirming_close = True
+        try:
+            answer = QMessageBox.warning(
+                self, "도구 닫기", self.close_warning_text(),
+                QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel,
+            )
+        finally:
+            self._confirming_close = False
+        if answer == QMessageBox.Ok:
+            self.dismissed = True
+            self.dismissed_by_user.emit()
             event.accept()
         else:
             event.ignore()
@@ -309,7 +343,7 @@ class NoteWindow(_BottomWindow):
         self.event = event
         self.expanded = False
         self.setObjectName("desktopNote")
-        self.setFixedWidth(340)
+        self.setFixedWidth(380)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 12)
         layout.setSpacing(8)
@@ -328,6 +362,8 @@ class NoteWindow(_BottomWindow):
         title_row.addWidget(self.title_label, 1)
         self.handle = self._make_handle()
         title_row.addWidget(self.handle)
+        self.close_button = self._make_close_button()
+        title_row.addWidget(self.close_button)
         layout.addLayout(title_row)
         self.details_label = QLabel()
         self.details_label.setTextFormat(Qt.PlainText)
@@ -457,6 +493,9 @@ class NoteWindow(_BottomWindow):
         if self.event.id is not None:
             self.completed.emit(int(self.event.id))
 
+    def close_warning_text(self):
+        return "이 포스트잇을 닫을까요?\n일정은 미완료 상태로 유지됩니다. 트레이의 '바탕화면 알림 다시 열기'에서 다시 표시할 수 있습니다."
+
     def _emit_moved(self):
         if self.event.id is not None:
             self.moved.emit(int(self.event.id), self.x(), self.y())
@@ -485,6 +524,8 @@ class DesktopListWindow(_BottomWindow):
         header.addWidget(heading, 1)
         self.handle = self._make_handle()
         header.addWidget(self.handle)
+        self.close_button = self._make_close_button()
+        header.addWidget(self.close_button)
         layout.addLayout(header)
         self.list_widget = QListWidget()
         self.list_widget.setItemDelegate(_UrgencyListDelegate(self.list_widget))
@@ -600,6 +641,9 @@ class DesktopListWindow(_BottomWindow):
     def _complete(self):
         if self.selected_event_id in self.events:
             self.completed.emit(self.selected_event_id)
+
+    def close_warning_text(self):
+        return "일정 목록을 닫을까요?\n모든 일정은 미완료 상태로 유지됩니다. 트레이의 '바탕화면 알림 다시 열기'에서 다시 표시할 수 있습니다."
 
     def _emit_moved(self):
         self.moved.emit(self.x(), self.y())

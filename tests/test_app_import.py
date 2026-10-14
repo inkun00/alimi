@@ -305,6 +305,57 @@ class FileImportUiTests(unittest.TestCase):
         self.assertIn("중복 1건", self.window.import_result.toPlainText())
         self.assertEqual([], self.errors)
 
+    def test_reviewing_closed_tools_explains_tray_reopen_without_range_changes(self):
+        original = "2099년 10월 15일 닫아 둔 평가 일정"
+        self.window.receive_import_text(original, "학교 공지")
+        self.register()
+        saved = self.store.list_events()[0]
+        for index, mode in ((0, "sticky"), (1, "list")):
+            with self.subTest(mode=mode):
+                self.window.mode_combo.setCurrentIndex(index)
+                self.app.processEvents()
+                tool = self.window.notes[saved.id] if mode == "sticky" else self.window.desktop_list
+                with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Ok):
+                    tool.close_button.click()
+                self.window.receive_import_text(original, "학교 공지")
+                dialog = self.preview()
+                dialog.notes_editor.setPlainText(mode + "에서 수정한 메모")
+                self.register()
+                message = self.window.capture_notepad.status_label.text()
+                self.assertIn("1건은 바탕화면 도구를 닫아 숨겨져 있습니다", message)
+                self.assertIn("바탕화면 알림 다시 열기", message)
+                self.assertNotIn("설정한 표시 기간 밖", message)
+                self.assertFalse(tool.isVisible())
+                self.assertEqual("open", self.store.get_event(saved.id).status)
+                self.assertEqual(mode + "에서 수정한 메모", self.store.get_event(saved.id).notes)
+                self.assertEqual(1, len(self.store.list_events()))
+                self.window.restore_desktop_tools()
+                self.app.processEvents()
+                self.assertTrue(tool.isVisible())
+
+    def test_registration_counts_closed_tools_separately_from_outside_range_schedules(self):
+        today = date.today()
+        original = f"{today.year}년 {today.month}월 {today.day}일 닫아 둔 당일 일정"
+        self.window.receive_import_text(original, "학교 공지")
+        self.register()
+        self.window.reminder_future_days.setValue(3)
+        self.window.reminder_unlimited.setChecked(False)
+        self.window.mode_combo.setCurrentIndex(1)
+        self.app.processEvents()
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Ok):
+            self.window.desktop_list.close_button.click()
+        future = today + timedelta(days=8)
+        future_text = f"{future.year}년 {future.month}월 {future.day}일 범위 밖 일정"
+        self.window.receive_import_text(original + "\n" + future_text, "학교 공지")
+        self.register()
+        message = self.window.capture_notepad.status_label.text()
+        self.assertIn("1건은 바탕화면 도구를 닫아 숨겨져 있습니다", message)
+        self.assertIn("바탕화면 알림 다시 열기", message)
+        self.assertIn("1건은 설정한 표시 기간 밖입니다", message)
+        self.assertIn("기간을 늘리거나", message)
+        self.assertEqual(2, len(self.store.list_events()))
+        self.assertTrue(all(event.status == "open" for event in self.store.list_events()))
+
     def test_future_registration_explains_limited_range_then_enabling_unlimited_displays_it(self):
         self.window.reminder_future_days.setValue(3)
         self.window.reminder_unlimited.setChecked(False)
@@ -614,13 +665,14 @@ class FileImportUiTests(unittest.TestCase):
         notepad = self.window.capture_notepad
         self.assertIsNone(notepad.parent())
         self.assertTrue(notepad.isVisible())
-        self.assertTrue(notepad.windowFlags() & Qt.WindowStaysOnBottomHint)
-        self.assertFalse(notepad.windowFlags() & Qt.WindowStaysOnTopHint)
+        self.assertFalse(notepad.windowFlags() & Qt.WindowStaysOnBottomHint)
+        self.assertTrue(notepad.windowFlags() & Qt.WindowStaysOnTopHint)
         self.assertTrue(notepad.collapsed)
         self.assertTrue(notepad.icon_button.isVisible())
         self.assertFalse(notepad.editor.isVisible())
         self.window.show()
-        self.window.close()
+        with patch("alimi.app.QMessageBox.warning", return_value=QMessageBox.Ok):
+            self.window.close()
         self.app.processEvents()
         self.assertFalse(self.window.isVisible())
         self.assertTrue(notepad.isVisible())
@@ -628,7 +680,8 @@ class FileImportUiTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(notepad.collapsed,
                         "Routine reminder updates must not reopen the desktop editor.")
-        notepad.close()
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Cancel):
+            notepad.close()
         self.app.processEvents()
         self.assertTrue(notepad.isVisible())
         self.window.mode_combo.setCurrentIndex(1)
@@ -769,7 +822,8 @@ class FileImportUiTests(unittest.TestCase):
         self.assertTrue(notepad.isVisible())
         self.assertFalse(notepad.collapsed,
                          "A canceled session close should restore the user's active editor view.")
-        notepad.close()
+        with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Cancel):
+            notepad.close()
         self.app.processEvents()
         self.assertTrue(notepad.isVisible())
         self.assertEqual([], self.store.list_events())
@@ -799,7 +853,8 @@ class FileImportUiTests(unittest.TestCase):
                 self.assertEqual(collapsed, notepad.collapsed)
                 self.assertEqual(position, notepad.pos())
                 self.assertEqual(text, notepad.editor.toPlainText())
-                notepad.close()
+                with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Cancel):
+                    notepad.close()
                 self.app.processEvents()
                 self.assertTrue(notepad.isVisible())
                 self.assertEqual([], self.store.list_events())

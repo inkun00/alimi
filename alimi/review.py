@@ -10,8 +10,8 @@ from typing import Iterable
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
-    QAbstractItemView, QDialog, QHBoxLayout, QHeaderView, QLabel,
-    QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
+    QAbstractItemView, QApplication, QDialog, QHBoxLayout, QHeaderView, QLabel,
+    QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
     QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -115,6 +115,20 @@ class ImportReviewDialog(QDialog):
         buttons.addWidget(self.register_button)
         layout.addLayout(buttons)
         self.append_candidates(candidates, errors)
+
+    def closeEvent(self, event) -> None:
+        application = QApplication.instance()
+        if application and application.property("shutting_down"):
+            super().closeEvent(event)
+            return
+        answer = QMessageBox.warning(
+            self, "일정 확인 창 닫기", "확인 창을 닫을까요?\n등록하지 않은 수정 내용은 저장되지 않습니다.",
+            QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel,
+        )
+        if answer == QMessageBox.Ok:
+            super().closeEvent(event)
+        else:
+            event.ignore()
 
     def _update_summary(self) -> None:
         count = self.table.rowCount()

@@ -169,10 +169,64 @@ class CaptureOverlay(QWidget):
         self.screenshot = screen.grabWindow(0)
         self.origin = None
         self.selection = QRect()
+        self._finished = False
+        self._close_prompt_active = False
         self.setGeometry(screen.geometry())
         self.setCursor(Qt.CrossCursor)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setWindowTitle("일정 화면 캡처")
+        self.close_button = QPushButton("닫기", self)
+        self.close_button.setFixedSize(88, 34)
+        self.close_button.setCursor(Qt.ArrowCursor)
+        self.close_button.setStyleSheet(
+            "QPushButton { background: white; color: #23382f; border: 1px solid #c9d6ce; "
+            "border-radius: 6px; padding: 4px 12px; font: 10pt 'Malgun Gothic'; }"
+            "QPushButton:hover { background: #e8f0ea; }"
+        )
+        self.close_button.clicked.connect(self.close)
+        self._position_close_button()
+
+    def _position_close_button(self):
+        self.close_button.move(max(0, self.width() - self.close_button.width() - 18), 14)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "close_button"):
+            self._position_close_button()
+
+    def _cancel_capture(self):
+        if self._finished:
+            return
+        self._finished = True
+        self.hide()
+        self.canceled.emit()
+        self.deleteLater()
+
+    def closeEvent(self, event):
+        if self._finished:
+            event.accept()
+            return
+        application = QApplication.instance()
+        if application and application.property("shutting_down"):
+            self._cancel_capture()
+            event.accept()
+            return
+        if self._close_prompt_active:
+            event.ignore()
+            return
+        self._close_prompt_active = True
+        try:
+            answer = QMessageBox.warning(
+                self, "화면 캡처 닫기", "화면 캡처를 닫을까요?\n선택한 영역은 가져오지 않습니다.",
+                QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel,
+            )
+        finally:
+            self._close_prompt_active = False
+        if answer == QMessageBox.Ok:
+            self._cancel_capture()
+            event.accept()
+        else:
+            event.ignore()
 
     def paintEvent(self, _):
         painter = QPainter(self)
@@ -189,17 +243,17 @@ class CaptureOverlay(QWidget):
         painter.drawText(22, 35, "일정이 있는 영역을 드래그하세요 · Esc 취소")
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if not self._finished and not self._close_prompt_active and event.button() == Qt.LeftButton:
             self.origin = event.pos()
             self.selection = QRect(self.origin, self.origin)
 
     def mouseMoveEvent(self, event):
-        if self.origin is not None:
+        if not self._finished and not self._close_prompt_active and self.origin is not None:
             self.selection = QRect(self.origin, event.pos()).normalized().intersected(self.rect())
             self.update()
 
     def mouseReleaseEvent(self, event):
-        if event.button() != Qt.LeftButton or self.origin is None:
+        if self._finished or self._close_prompt_active or event.button() != Qt.LeftButton or self.origin is None:
             return
         selection = self.selection.normalized()
         if selection.width() < 12 or selection.height() < 12:
@@ -209,15 +263,14 @@ class CaptureOverlay(QWidget):
         physical = QRect(round(selection.x() * scale_x), round(selection.y() * scale_y),
                          round(selection.width() * scale_x), round(selection.height() * scale_y))
         image = qimage_to_pil(self.screenshot.copy(physical).toImage())
+        self._finished = True
         self.hide()
         self.captured.emit(image)
         self.deleteLater()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
-            self.hide()
-            self.canceled.emit()
-            self.deleteLater()
+            self._cancel_capture()
 
 
 class EventDialog(QDialog):
@@ -258,6 +311,20 @@ class EventDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def closeEvent(self, event):
+        application = QApplication.instance()
+        if application and application.property("shutting_down"):
+            super().closeEvent(event)
+            return
+        answer = QMessageBox.warning(
+            self, "일정 입력 창 닫기", "입력 창을 닫을까요?\n확정 저장하지 않은 수정 내용은 저장되지 않습니다.",
+            QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel,
+        )
+        if answer == QMessageBox.Ok:
+            super().closeEvent(event)
+        else:
+            event.ignore()
+
     def accept(self):
         try:
             if not self.title_field.text().strip():
@@ -294,6 +361,9 @@ class MainWindow(QMainWindow):
         self.store, self.args, self.icon = store, args, icon
         self.notes: dict[int, NoteWindow] = {}
         self.desktop_list: DesktopListWindow | None = None
+        self._dismissed_note_ids: set[int] = set()
+        self._desktop_list_dismissed = False
+        self._confirming_close = False
         self.desktop_mode = self.store.get_setting("desktop_mode", "sticky")
         if self.desktop_mode not in ("sticky", "list"):
             self.desktop_mode = "sticky"
@@ -317,7 +387,13 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(20, 20, 20, 15)
         heading = QLabel(APP_NAME)
         heading.setProperty("heading", True)
-        outer.addWidget(heading)
+        heading_row = QHBoxLayout()
+        heading_row.addWidget(heading, 1)
+        self.close_button = QPushButton("닫기")
+        self.close_button.setAccessibleName("관리 창 닫기")
+        self.close_button.clicked.connect(self.close)
+        heading_row.addWidget(self.close_button)
+        outer.addLayout(heading_row)
         subtitle = QLabel("내 PC에만 저장 · 메모는 바탕화면에 독립적으로 표시")
         subtitle.setProperty("muted", True)
         outer.addWidget(subtitle)
@@ -585,6 +661,7 @@ class MainWindow(QMainWindow):
         self.capture_notepad.review_requested.connect(self.review_capture_draft)
         self.capture_notepad.moved.connect(self.save_capture_position)
         self.capture_notepad.view_changed.connect(self.capture_view_changed)
+        self.capture_notepad.dismissed_by_user.connect(self.save_capture_draft)
         x = self.store.get_setting("capture_x", "")
         y = self.store.get_setting("capture_y", "")
         wanted = QPoint(int(x), int(y)) if str(x).lstrip("-").isdigit() and str(y).lstrip("-").isdigit() else None
@@ -600,9 +677,34 @@ class MainWindow(QMainWindow):
     def show_capture_notepad(self, expand=False):
         if self.capture_notepad:
             if expand:
+                self.capture_notepad.dismissed = False
                 self.capture_notepad.expand_notepad()
+            if self.capture_notepad.dismissed:
+                return
             self.capture_notepad.show()
             self.capture_notepad.keep_below_windows()
+
+    def restore_desktop_tools(self):
+        self._dismissed_note_ids.clear()
+        self._desktop_list_dismissed = False
+        for note in self.notes.values():
+            note.dismissed = False
+            note.show()
+        if self.desktop_list:
+            self.desktop_list.dismissed = False
+        self.sync_notes()
+        self.refresh_agenda()
+        self.status_label.setText("닫았던 바탕화면 알림을 다시 표시했습니다.")
+
+    def dismiss_note(self, event_id):
+        self._dismissed_note_ids.add(event_id)
+        self.refresh_agenda()
+        # closeEvent hides the window after this signal is delivered.
+        QTimer.singleShot(0, self.arrange_desktop_bottom)
+
+    def dismiss_desktop_list(self):
+        self._desktop_list_dismissed = True
+        self.refresh_agenda()
 
     def capture_view_changed(self, collapsed):
         note = self.capture_notepad
@@ -643,6 +745,7 @@ class MainWindow(QMainWindow):
         menu = QMenu()
         menu.addAction("달력 열기", self.show_manager)
         menu.addAction("일정 메모장 열기", lambda _checked=False: self.show_capture_notepad(expand=True))
+        menu.addAction("바탕화면 알림 다시 열기", self.restore_desktop_tools)
         menu.addAction("일정 직접 추가", self.add_manual)
         menu.addAction("화면 영역 캡처", self.capture_screen)
         menu.addSeparator()
@@ -684,6 +787,7 @@ class MainWindow(QMainWindow):
         self.desktop_mode = self.mode_combo.currentData()
         self.store.set_setting("desktop_mode", self.desktop_mode)
         self.sync_notes()
+        self.refresh_agenda()
 
     def make_alignment_combo(self):
         combo = QComboBox()
@@ -745,16 +849,28 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if QApplication.instance().property("shutting_down"):
             event.accept()
-        else:
+            return
+        event.ignore()
+        if self._confirming_close:
+            return
+        self._confirming_close = True
+        try:
+            answer = QMessageBox.warning(
+                self, "관리 창 닫기",
+                "관리 창을 닫을까요?\n알리미는 트레이에서 계속 실행됩니다. 트레이의 '달력 열기'에서 다시 열 수 있습니다.",
+                QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel,
+            )
+        finally:
+            self._confirming_close = False
+        if answer == QMessageBox.Ok:
             self.hide()
-            event.ignore()
 
     def request_quit(self):
         if self.jobs:
             QMessageBox.information(self, "자료 분석 중", "자료 분석이 끝난 뒤 종료해 주세요.")
             return
         if self.store.reminder_events():
-            QMessageBox.information(self, "미완료 일정", "표시 중인 메모는 완료해야 사라집니다. 관리 창은 닫아도 알리미가 계속 실행됩니다.")
+            QMessageBox.information(self, "미완료 일정", "미완료 일정이 남아 있어 알리미를 종료할 수 없습니다. 도구의 닫기는 일정 완료 처리가 아닙니다. 관리 창과 바탕화면 도구는 닫아도 트레이에서 계속 실행됩니다.")
             return
         QApplication.instance().setProperty("shutting_down", True)
         QApplication.instance().quit()
@@ -805,12 +921,15 @@ class MainWindow(QMainWindow):
         self.agenda.clear()
         events = [event for event in self.store.list_events() if event.start_date == selected or
                   (event.start_date and event.end_date and event.start_date <= selected <= event.end_date)]
-        visible_ids = {event.id for event in self.store.reminder_events()}
+        eligible_ids = {event.id for event in self.store.reminder_events()}
         for event in events:
+            tool_closed = (self._desktop_list_dismissed if self.desktop_mode == "list" else
+                           event.id in self._dismissed_note_ids)
             state = ("확인 필요 · 알림 보류" if event.status == "review" else
                      "완료" if event.status == "done" else
-                     "미완료 · 바탕화면 알림 표시 중" if event.id in visible_ids else
-                     "미완료 · 설정한 표시 기간 밖")
+                     "미완료 · 설정한 표시 기간 밖" if event.id not in eligible_ids else
+                     "미완료 · 바탕화면 도구 닫힘" if tool_closed else
+                     "미완료 · 바탕화면 알림 표시 중")
             timing = format_event_date(event) if event.date_precision == "month" else (event.time or '종일')
             item = QListWidgetItem(f"{timing}  {event.title}\n{event.place or event.source}  ·  {state}")
             item.setData(Qt.UserRole, event.id)
@@ -846,6 +965,9 @@ class MainWindow(QMainWindow):
             text = "완료한 일정이라 포스트잇을 표시하지 않습니다. 완료 기록에서 완료 취소할 수 있습니다."
         elif event.id not in {item.id for item in self.store.reminder_events()}:
             text = f"마감: {format_event_deadline(event, include_year=True)}. 일정은 저장되어 있으며, 설정한 바탕화면 표시 기간 밖이라 숨겨져 있습니다. " + self.reminder_window_description() + " 설정에서 기간을 늘리거나 ‘날짜 제한 없이’ 표시를 선택하세요."
+        elif ((self.desktop_mode == "list" and self._desktop_list_dismissed) or
+              (self.desktop_mode == "sticky" and event.id in self._dismissed_note_ids)):
+            text = "바탕화면 도구를 닫아 이 일정이 숨겨져 있습니다. 일정은 미완료 상태로 저장되어 있습니다. 트레이의 '바탕화면 알림 다시 열기'에서 다시 표시할 수 있습니다."
         else:
             text = "이 일정은 바탕화면에 표시됩니다. " + event_urgency(event).label + ". 관리 창을 닫아도 알림은 남습니다. 접힌 알림은 다른 창 아래에, 펼친 포스트잇은 다른 창 앞에 표시됩니다."
         self.note_reason.setText(text)
@@ -865,6 +987,14 @@ class MainWindow(QMainWindow):
                 self.store.reopen_event(event.id)
             elif event.status == "review":
                 self.store.upsert_event(replace(event, status="open"))
+            self._dismissed_note_ids.discard(int(event.id))
+            existing_note = self.notes.get(int(event.id))
+            if existing_note:
+                existing_note.dismissed = False
+            if self.desktop_mode == "list":
+                self._desktop_list_dismissed = False
+                if self.desktop_list:
+                    self.desktop_list.dismissed = False
             self.calendar.setSelectedDate(QDate.currentDate())
             self.navigation.setCurrentRow(0)
             self.refresh()
@@ -929,7 +1059,8 @@ class MainWindow(QMainWindow):
                 self.safe_position(window, Event(x=x, y=y), 0)
                 window.keep_below_windows()
                 return
-            ordered = [self.notes[int(e.id)] for e in self.store.reminder_events() if int(e.id) in self.notes]
+            ordered = [self.notes[int(e.id)] for e in self.store.reminder_events()
+                       if int(e.id) in self.notes and int(e.id) not in self._dismissed_note_ids]
             if not ordered:
                 return
             if not automatic:
@@ -987,9 +1118,10 @@ class MainWindow(QMainWindow):
                         self.desktop_list.completed.connect(self.complete_event)
                         self.desktop_list.moved.connect(self.save_list_position)
                         self.desktop_list.size_changed.connect(self.desktop_size_changed)
+                        self.desktop_list.dismissed_by_user.connect(self.dismiss_desktop_list)
                     else:
                         self.desktop_list.update_events(due)
-                    if not self.desktop_list.isVisible():
+                    if not self._desktop_list_dismissed and not self.desktop_list.isVisible():
                         self.desktop_list.show()
                 elif self.desktop_list is not None:
                     self.desktop_list.finish()
@@ -1004,13 +1136,18 @@ class MainWindow(QMainWindow):
                         self.notes.pop(id_).finish()
                 for index, event in enumerate(due):
                     id_ = int(event.id)
+                    if id_ in self._dismissed_note_ids:
+                        continue
                     if id_ in self.notes:
                         self.notes[id_].update_event(event)
+                        if not self.notes[id_].isVisible():
+                            self.notes[id_].show()
                     else:
                         note = NoteWindow(event, font_size)
                         note.completed.connect(self.complete_event)
                         note.moved.connect(self.save_note_position)
                         note.size_changed.connect(self.desktop_size_changed)
+                        note.dismissed_by_user.connect(lambda event_id=id_: self.dismiss_note(event_id))
                         self.notes[id_] = note
                         self.safe_position(note, event, index)
                         note.show()
@@ -1047,6 +1184,7 @@ class MainWindow(QMainWindow):
     def complete_event(self, id_):
         try:
             self.store.complete_event(id_)
+            self._dismissed_note_ids.discard(id_)
             if id_ in self.notes:
                 self.notes.pop(id_).finish()
             self.refresh()
@@ -1194,7 +1332,11 @@ class MainWindow(QMainWindow):
         else:
             rendered = {id_ for id_, note in self.notes.items() if note.isVisible()}
         shown = sum(id_ in rendered for id_ in matched)
-        hidden = sum(event.status == "open" and id_ not in rendered for id_, event in matched.items())
+        eligible_ids = {event.id for event in self.store.reminder_events()}
+        hidden_by_range = sum(event.status == "open" and id_ not in eligible_ids
+                              for id_, event in matched.items())
+        hidden_by_close = sum(event.status == "open" and id_ in eligible_ids and id_ not in rendered
+                              for id_, event in matched.items())
         completed = sum(event.status == "done" for event in matched.values())
         message = (f"이미 등록된 일정 {duplicates}건입니다. 기존 일정을 유지했습니다." if not added and not updated and duplicates else
                    f"새 일정 {added}건을 등록했습니다." + (f" 이미 등록된 {duplicates}건은 중복으로 추가하지 않았습니다." if duplicates else ""))
@@ -1202,8 +1344,10 @@ class MainWindow(QMainWindow):
             message += f" 기존 일정 {updated}건을 수정했습니다."
         if shown:
             message += f" 바탕화면에 {shown}건을 표시했습니다."
-        if hidden:
-            message += f" {hidden}건은 설정한 표시 기간 밖입니다. 설정에서 기간을 늘리거나 ‘날짜 제한 없이’ 표시를 선택하세요."
+        if hidden_by_close:
+            message += f" {hidden_by_close}건은 바탕화면 도구를 닫아 숨겨져 있습니다. 트레이의 '바탕화면 알림 다시 열기'에서 다시 표시하세요."
+        if hidden_by_range:
+            message += f" {hidden_by_range}건은 설정한 표시 기간 밖입니다. 설정에서 기간을 늘리거나 ‘날짜 제한 없이’ 표시를 선택하세요."
         if completed:
             message += f" 완료된 기존 일정 {completed}건은 완료 상태를 유지합니다. 다시 표시하려면 완료 기록에서 완료 취소하세요."
         self.import_result.setPlainText(summary + "\n" + message + "\n\n" + text[:18000])
@@ -1384,10 +1528,10 @@ class MainWindow(QMainWindow):
             self.show_capture_notepad()
             self.sync_notes()
             for note in self.notes.values():
-                if not note.isVisible():
+                if not note.isVisible() and not note.dismissed:
                     note.show()
                     note.keep_below_windows()
-            if self.desktop_list and not self.desktop_list.isVisible():
+            if self.desktop_list and not self.desktop_list.isVisible() and not self._desktop_list_dismissed:
                 self.desktop_list.show()
                 self.desktop_list.keep_below_windows()
         QTimer.singleShot(10_000, recover_canceled_shutdown)
@@ -1395,6 +1539,17 @@ class MainWindow(QMainWindow):
 
 def smoke_test(app, window, store, report_path: Path):
     report = {"success": False, "version": APP_VERSION, "checks": {}}
+    def close_with_answer(widget, answer, button=None):
+        def respond():
+            box = app.activeModalWidget()
+            if isinstance(box, QMessageBox):
+                warning_path = report_path.with_name(report_path.stem + "-close-warning.png")
+                if not warning_path.exists():
+                    box.grab().save(str(warning_path))
+                box.button(answer).click()
+        QTimer.singleShot(0, respond)
+        (button.click if button else widget.close)()
+        app.processEvents()
     try:
         event = store.upsert_event(Event(title="실행 검증 일정", start_date=date.today().isoformat(),
                                         time="15:30", place="테스트 회의실", source="실행 검증"))
@@ -1419,15 +1574,20 @@ def smoke_test(app, window, store, report_path: Path):
         app.processEvents()
         window.grab().save(str(report_path.with_name(report_path.stem + "-manager.png")))
         note.grab().save(str(report_path.with_name(report_path.stem + "-note.png")))
-        window.close()
-        app.processEvents()
+        close_with_answer(window, QMessageBox.Cancel, window.close_button)
+        report["checks"]["manager_close_cancel_keeps_visible"] = window.isVisible()
+        close_with_answer(window, QMessageBox.Ok, window.close_button)
         report["checks"]["manager_close_keeps_note"] = not window.isVisible() and note.isVisible()
         capture = window.capture_notepad
         report["checks"]["always_visible_desktop_notepad"] = capture.parent() is None and capture.isVisible() and not capture.editor.isReadOnly()
         report["checks"]["desktop_notepad_starts_as_icon"] = capture.collapsed and capture.icon_button.isVisible() and not capture.editor.isVisible() and not capture.isMinimized()
         report["checks"]["notepad_icon_is_not_cropped"] = (
-            capture.width() == 72 and capture.height() == 70 and
+            capture.width() == 72 and capture.height() == 96 and
             capture.icon_button.height() >= capture.icon_button.iconSize().height())
+        report["checks"]["notepad_icon_has_close_button"] = capture.icon_close_button.isVisible()
+        report["checks"]["notepad_always_on_top"] = (
+            bool(capture.windowHandle().flags() & Qt.WindowStaysOnTopHint) and
+            not bool(capture.windowHandle().flags() & Qt.WindowStaysOnBottomHint))
         icon_image = capture.grab().toImage()
         report["checks"]["notepad_icon_has_transparent_background"] = (
             capture.testAttribute(Qt.WA_TranslucentBackground) and
@@ -1460,12 +1620,24 @@ def smoke_test(app, window, store, report_path: Path):
         report["checks"]["minimize_button_keeps_desktop_icon_visible"] = capture.collapsed and capture.isVisible() and not capture.isMinimized()
         capture.expand_notepad()
         app.processEvents()
-        capture.close()
-        report["checks"]["notepad_close_blocked"] = capture.isVisible()
+        close_with_answer(capture, QMessageBox.Cancel, capture.close_button)
+        report["checks"]["notepad_close_cancel_keeps_visible"] = capture.isVisible()
         capture.grab().save(str(report_path.with_name(report_path.stem + "-notepad.png")))
-        note.close()
-        app.processEvents()
-        report["checks"]["note_close_blocked"] = note.isVisible()
+        close_with_answer(capture, QMessageBox.Ok, capture.close_button)
+        window.sync_notes()
+        report["checks"]["notepad_close_preserves_draft_and_stays_closed"] = (
+            not capture.isVisible() and capture.dismissed and
+            store.get_setting("capture_draft") == capture.editor.toPlainText())
+        window.show_capture_notepad(expand=True)
+        report["checks"]["notepad_reopens_from_tray_action"] = capture.isVisible() and not capture.dismissed
+        close_with_answer(note, QMessageBox.Cancel, note.close_button)
+        report["checks"]["note_close_cancel_keeps_visible"] = note.isVisible()
+        close_with_answer(note, QMessageBox.Ok, note.close_button)
+        window.sync_notes()
+        report["checks"]["note_close_preserves_unfinished_and_stays_closed"] = (
+            not note.isVisible() and store.get_event(event.id).status == "open")
+        window.restore_desktop_tools()
+        report["checks"]["note_reopens_from_tray_action"] = note.isVisible() and not note.dismissed
         note.title_label.click()
         note.complete_button.click()
         app.processEvents()
@@ -1698,8 +1870,13 @@ def smoke_test(app, window, store, report_path: Path):
             window.sync_notes()
             report["checks"]["list_details_survive_refresh"] = listing.expanded and listing.selected_event_id in remaining_ids
             listing.grab().save(str(report_path.with_name(report_path.stem + "-list-detail.png")))
-            listing.close()
-            report["checks"]["list_close_blocked"] = listing.isVisible()
+            close_with_answer(listing, QMessageBox.Cancel, listing.close_button)
+            report["checks"]["list_close_cancel_keeps_visible"] = listing.isVisible()
+            close_with_answer(listing, QMessageBox.Ok, listing.close_button)
+            window.sync_notes()
+            report["checks"]["list_close_stays_closed_after_refresh"] = not listing.isVisible()
+            window.restore_desktop_tools()
+            report["checks"]["list_reopens_from_tray_action"] = listing.isVisible()
         window.mode_combo.setCurrentIndex(0)
         app.processEvents()
         report["checks"]["mode_switch_preserves_all_events"] = window.desktop_list is None and set(window.notes) == remaining_ids
@@ -1792,6 +1969,19 @@ def smoke_test(app, window, store, report_path: Path):
                     not note.expanded and not bool(user.GetWindowLongPtrW(note_id, -20) & 0x8) and
                     note_id in positions and probe_id in positions and
                     positions.index(note_id) > positions.index(probe_id))
+                for collapsed, label in ((True, "icon"), (False, "editor")):
+                    capture.set_collapsed(collapsed)
+                    window.sync_notes()
+                    probe.raise_()
+                    app.processEvents()
+                    positions.clear()
+                    user.EnumWindows(collect_position, 0)
+                    capture_id = int(capture.winId())
+                    report["checks"][f"native_notepad_{label}_is_topmost"] = bool(
+                        user.GetWindowLongPtrW(capture_id, -20) & 0x8)
+                    report["checks"][f"native_notepad_{label}_above_ordinary_window"] = (
+                        capture_id in positions and probe_id in positions and
+                        positions.index(capture_id) < positions.index(probe_id))
                 probe.close()
         event_count = len(store.list_events())
         edited_date = (date.today() + timedelta(days=1)).isoformat()

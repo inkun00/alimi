@@ -11,7 +11,10 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .desktop import _BottomWindow
+from .desktop import (
+    _BottomWindow, _native_is_topmost, _native_set_z_order,
+    _native_windows_surface,
+)
 
 
 CAPTURE_INSTRUCTION = "텍스트를 입력하거나 텍스트·파일·이미지를 붙여넣고 끌어 놓으세요."
@@ -122,7 +125,7 @@ class MimeTextEdit(QTextEdit):
 
 
 class CaptureNotepad(_BottomWindow):
-    """A persistent, independently editable notepad underneath other windows."""
+    """An independently editable notepad above ordinary windows in both views."""
 
     payload_received = pyqtSignal(object)
     review_requested = pyqtSignal()
@@ -132,6 +135,8 @@ class CaptureNotepad(_BottomWindow):
 
     def __init__(self, draft="", font_size=12):
         super().__init__()
+        self.setWindowFlags((self.windowFlags() & ~Qt.WindowStaysOnBottomHint)
+                            | Qt.WindowStaysOnTopHint)
         # Windows needs a translucent frameless surface before the first HWND
         # exists. Keep that same surface while the opaque paper panel opens.
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -160,10 +165,14 @@ QPushButton#notepadIcon { background: transparent; border: none; padding: 0;
   min-width: 72px; max-width: 72px; min-height: 70px; max-height: 70px; }
 QPushButton#notepadIcon:hover, QPushButton#notepadIcon:focus,
 QPushButton#notepadIcon:pressed { background: transparent; border: none; }
-QPushButton#minimizeNotepad { padding: 1px 6px; font-size: 18px; }
+QPushButton#minimizeNotepad, QPushButton#closeTool { padding: 1px 6px; font-size: 18px; }
 QScrollBar:vertical { background: #faedbd; width: 12px; }
 QScrollBar::handle:vertical { background: #b8a568; min-height: 24px; border-radius: 4px; }
 """)
+        # Switching the inherited window layer can retain the base tool's style
+        # cache. Apply the paper styles before creating its child controls.
+        self.style().unpolish(self)
+        self.style().polish(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -173,6 +182,13 @@ QScrollBar::handle:vertical { background: #b8a568; min-height: 24px; border-radi
         compact_layout = QVBoxLayout(self.compact_panel)
         compact_layout.setContentsMargins(0, 0, 0, 0)
         compact_layout.setSpacing(0)
+        compact_header = QHBoxLayout()
+        compact_header.setContentsMargins(0, 0, 0, 0)
+        compact_header.setSpacing(0)
+        compact_header.addStretch(1)
+        self.icon_close_button = self._make_close_button(self.compact_panel)
+        compact_header.addWidget(self.icon_close_button)
+        compact_layout.addLayout(compact_header)
         self.icon_button = QPushButton(self.compact_panel)
         self.icon_button.setObjectName("notepadIcon")
         self.icon_button.setIcon(_notepad_icon())
@@ -207,6 +223,8 @@ QScrollBar::handle:vertical { background: #b8a568; min-height: 24px; border-radi
         self.minimize_button.setToolTip("바탕화면 아이콘으로 최소화")
         self.minimize_button.clicked.connect(lambda: self.set_collapsed(True))
         header.addWidget(self.minimize_button)
+        self.close_button = self._make_close_button(self.header)
+        header.addWidget(self.close_button)
         self.handle = self._make_handle()
         self.handle.setAccessibleName("일정 메모장 이동 영역")
         self.handle.setToolTip("드래그해서 이동 · 더블클릭하면 아이콘으로 최소화")
@@ -270,7 +288,7 @@ QScrollBar::handle:vertical { background: #b8a568; min-height: 24px; border-radi
             # The application's button stylesheet can repolish the child and
             # resize it before its first layout. Use the icon view's intended
             # bounds, rather than copying that temporary child geometry.
-            self.setFixedSize(72, 70)
+            self.setFixedSize(72, 96)
         else:
             self.compact_panel.hide()
             self.expanded_panel.show()
@@ -288,6 +306,29 @@ QScrollBar::handle:vertical { background: #b8a568; min-height: 24px; border-radi
             (self.icon_button if collapsed else self.editor).setFocus(Qt.OtherFocusReason)
             self.keep_below_windows()
         self.view_changed.emit(collapsed)
+
+    def keep_below_windows(self):
+        """Retain the foreground layer without activating the editable tool."""
+        if self._lowering or not self.isVisible():
+            return
+        self._lowering = True
+        try:
+            handle = self.windowHandle()
+            if handle is not None:
+                flags = handle.flags()
+                desired = ((flags & ~Qt.WindowStaysOnBottomHint)
+                           | Qt.WindowStaysOnTopHint)
+                if flags != desired:
+                    # QWindow flags keep the visible QWidget and its HWND alive.
+                    handle.setFlags(desired)
+            if _native_windows_surface():
+                hwnd = int(self.winId())
+                if not _native_is_topmost(hwnd):
+                    _native_set_z_order(hwnd, -1)  # HWND_TOPMOST, no activation
+            else:
+                self.raise_()
+        finally:
+            self._lowering = False
 
     def toggle_collapsed(self):
         self.set_collapsed(not self.collapsed)
