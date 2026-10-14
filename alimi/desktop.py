@@ -7,7 +7,7 @@ import sys
 from ctypes import wintypes
 from datetime import date
 
-from PyQt5.QtCore import QEvent, QSignalBlocker, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QRect, QSignalBlocker, QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QFontMetrics, QPen
 from PyQt5.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
@@ -199,17 +199,56 @@ class _TitleButton(QPushButton):
         self._update_lines()
 
 
+DEADLINE_ROLE = Qt.UserRole + 1
+
+
 class _UrgencyListDelegate(QStyledItemDelegate):
-    """Keep an urgent row's color when selected, with a visible selection edge."""
+    """Align deadlines and titles while preserving each row's urgency color."""
+
+    @staticmethod
+    def deadline_font(font):
+        font = QFont(font)
+        font.setBold(True)
+        return font
+
+    def column_rects(self, option, index):
+        styled = QStyleOptionViewItem(option)
+        self.initStyleOption(styled, index)
+        style = styled.widget.style() if styled.widget else QApplication.style()
+        text_rect = style.subElementRect(QStyle.SE_ItemViewItemText, styled, styled.widget)
+        metrics = QFontMetrics(self.deadline_font(styled.font))
+        samples = [f"12/31({weekday})" for weekday in "월화수목금토일"] + ["날짜 미정", "12월"]
+        width = max(76, max(metrics.horizontalAdvance(value) for value in samples) + 8)
+        # The style's text height can fit a regular font but clip its bold
+        # counterpart. Center both columns in the padded row's full height.
+        date_rect = QRect(text_rect.left(), styled.rect.top(), width, styled.rect.height())
+        title_rect = QRect(date_rect.right() + 11, styled.rect.top(),
+                           max(0, text_rect.right() - date_rect.right() - 10), styled.rect.height())
+        return date_rect, title_rect
 
     def paint(self, painter, option, index):
         styled = QStyleOptionViewItem(option)
+        self.initStyleOption(styled, index)
         selected = bool(styled.state & QStyle.State_Selected)
         # Native selection gradients can alter even a custom highlight palette.
         # Paint the model's actual urgency brush, then indicate selection with
         # an outline so a selected deadline retains the same readable color.
         styled.state &= ~(QStyle.State_Selected | QStyle.State_HasFocus)
-        super().paint(painter, styled, index)
+        date_rect, title_rect = self.column_rects(styled, index)
+        title = styled.text
+        styled.text = ""
+        style = styled.widget.style() if styled.widget else QApplication.style()
+        painter.save()
+        painter.setClipRect(styled.rect)
+        style.drawControl(QStyle.CE_ItemViewItem, styled, painter, styled.widget)
+        foreground = index.data(Qt.ForegroundRole)
+        painter.setPen(foreground.color() if isinstance(foreground, QBrush) else styled.palette.text().color())
+        painter.setFont(self.deadline_font(styled.font))
+        painter.drawText(date_rect, Qt.AlignLeft | Qt.AlignVCenter, index.data(DEADLINE_ROLE) or "")
+        painter.setFont(styled.font)
+        title = QFontMetrics(styled.font).elidedText(title, Qt.ElideRight, title_rect.width())
+        painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, title)
+        painter.restore()
         if selected:
             painter.save()
             painter.setPen(QPen(QColor("#493e1e"), 2))
@@ -534,8 +573,8 @@ class DesktopListWindow(_BottomWindow):
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.list_widget.setTextElideMode(Qt.ElideRight)
-        self.list_widget.setAccessibleName("미완료 일정 제목 목록")
-        self.list_widget.setToolTip("제목을 클릭하거나 Enter를 누르면 세부 내용을 표시합니다.")
+        self.list_widget.setAccessibleName("미완료 일정 날짜와 제목 목록")
+        self.list_widget.setToolTip("왼쪽에는 마감 날짜를 표시합니다. 날짜나 제목을 클릭하거나 Enter를 누르면 세부 내용을 표시합니다.")
         self.list_widget.itemClicked.connect(self._show_item)
         self.list_widget.itemActivated.connect(self._show_item)
         self.list_widget.installEventFilter(self)
@@ -581,7 +620,10 @@ class DesktopListWindow(_BottomWindow):
         for event_id, event in self.events.items():
             item = QListWidgetItem(event.title)
             item.setData(Qt.UserRole, event_id)
-            item.setToolTip(event.title)
+            deadline = format_event_deadline(event)
+            item.setData(DEADLINE_ROLE, deadline)
+            item.setData(Qt.AccessibleTextRole, deadline + " " + event.title)
+            item.setToolTip(format_event_deadline(event, include_year=True) + "\n" + event.title)
             urgency = event_urgency(event, today)
             item.setBackground(QBrush(QColor(urgency.background)))
             item.setForeground(QBrush(QColor(urgency.foreground)))

@@ -13,11 +13,14 @@ import onnxruntime
 onnxruntime.disable_telemetry_events()
 
 from PyQt5.QtCore import QEvent, QPoint, Qt
+from PyQt5.QtGui import QFontMetrics
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QMessageBox
+from PyQt5.QtWidgets import QApplication, QMessageBox, QStyleOptionViewItem
 
 from alimi.core import Event
-from alimi.desktop import DesktopListWindow, NoteWindow, event_details, format_event_deadline
+from alimi.desktop import (
+    DEADLINE_ROLE, DesktopListWindow, NoteWindow, event_details, format_event_deadline,
+)
 
 
 class DesktopReminderTests(unittest.TestCase):
@@ -226,6 +229,92 @@ class DesktopReminderTests(unittest.TestCase):
         self.assertTrue(window.details_panel.isVisible())
         self.assertIn("2026년 9월", window.details_label.text())
         self.assertIn(self.event.notes, window.details_label.text())
+
+    def test_list_deadlines_keep_day_range_month_and_undated_precision(self):
+        events = [
+            replace(self.event, id=12, date_precision="day", start_date="2026-10-22", end_date=None),
+            replace(self.event, id=13, date_precision="day", start_date="2026-10-01", end_date="2026-10-30"),
+            replace(self.event, id=14, date_precision="month", start_date="2026-11-01", end_date="2026-11-30"),
+            replace(self.event, id=15, date_precision="day", start_date=None, end_date=None),
+        ]
+        window = self.show(DesktopListWindow(events))
+        expected = ("10/22(목)", "10/30(금)", "11월", "날짜 미정")
+        tooltip_dates = ("2026-10-22(목)", "2026-10-30(금)", "2026년 11월", "날짜 미정")
+        for row, (event, deadline, tooltip_date) in enumerate(zip(events, expected, tooltip_dates)):
+            with self.subTest(deadline=deadline):
+                item = window.list_widget.item(row)
+                self.assertEqual(deadline, item.data(DEADLINE_ROLE))
+                self.assertEqual(event.id, item.data(Qt.UserRole))
+                self.assertEqual(event.title, item.text())
+                self.assertIn(tooltip_date, item.toolTip())
+                self.assertIn(event.title, item.toolTip())
+                self.assertIn(deadline, item.data(Qt.AccessibleTextRole))
+                self.assertIn(event.title, item.data(Qt.AccessibleTextRole))
+        self.assertFalse(window.details_panel.isVisible())
+        self.assertIsNone(window.selected_event_id)
+
+    def test_list_deadline_click_and_date_edit_refresh_keep_the_same_event(self):
+        original = replace(self.event, date_precision="day", start_date="2026-10-01", end_date="2026-10-30")
+        other = replace(original, id=13, title="다른 일정", end_date="2026-10-22")
+        window = self.show(DesktopListWindow([original, other]))
+        item = window.list_widget.item(0)
+        index = window.list_widget.indexFromItem(item)
+        delegate = window.list_widget.itemDelegate()
+        option = QStyleOptionViewItem()
+        delegate.initStyleOption(option, index)
+        option.widget = window.list_widget
+        option.rect = window.list_widget.visualItemRect(item)
+        deadline_rect, _ = delegate.column_rects(option, index)
+        QTest.mouseClick(window.list_widget.viewport(), Qt.LeftButton, pos=deadline_rect.center())
+        self.assertEqual(original.id, window.selected_event_id)
+        self.assertTrue(window.details_panel.isVisible())
+
+        edited = replace(original, title="수정한 일정", end_date="2026-11-07", notes="수정 후에도 같은 일정의 원문")
+        window.update_events([other, edited])
+        self.app.processEvents()
+        current = window.list_widget.currentItem()
+        self.assertEqual(original.id, window.selected_event_id)
+        self.assertEqual(original.id, current.data(Qt.UserRole))
+        self.assertEqual("11/7(토)", current.data(DEADLINE_ROLE))
+        self.assertEqual(edited.title, current.text())
+        self.assertTrue(window.details_panel.isVisible())
+        self.assertIn(edited.notes, window.details_label.text())
+        self.assertIn("2026-11-07", window.details_label.text())
+        self.assertNotIn(other.title, window.details_label.text())
+        self.assertEqual(other.id, window.list_widget.item(0).data(Qt.UserRole))
+
+    def test_list_deadline_columns_align_and_fit_at_supported_font_sizes(self):
+        events = [
+            replace(self.event, id=12, date_precision="day", end_date="2026-12-31"),
+            replace(self.event, id=13, date_precision="day", end_date="2026-01-01"),
+            replace(self.event, id=14),
+            replace(self.event, id=15, date_precision="day", start_date=None, end_date=None),
+        ]
+        for font_size in (11, 12, 14, 16, 18):
+            with self.subTest(font_size=font_size):
+                window = self.show(DesktopListWindow(events, font_size=font_size))
+                delegate = window.list_widget.itemDelegate()
+                title_lefts, date_widths = set(), set()
+                for row in range(window.list_widget.count()):
+                    item = window.list_widget.item(row)
+                    index = window.list_widget.indexFromItem(item)
+                    option = QStyleOptionViewItem()
+                    delegate.initStyleOption(option, index)
+                    option.widget = window.list_widget
+                    option.rect = window.list_widget.visualItemRect(item)
+                    deadline_rect, title_rect = delegate.column_rects(option, index)
+                    metrics = QFontMetrics(delegate.deadline_font(option.font))
+                    self.assertTrue(option.rect.contains(deadline_rect))
+                    self.assertTrue(option.rect.contains(title_rect))
+                    self.assertLess(deadline_rect.right(), title_rect.left())
+                    self.assertLessEqual(metrics.horizontalAdvance(item.data(DEADLINE_ROLE)), deadline_rect.width())
+                    self.assertLessEqual(metrics.height(), deadline_rect.height())
+                    self.assertGreaterEqual(title_rect.width(), 120)
+                    title_lefts.add(title_rect.left())
+                    date_widths.add(deadline_rect.width())
+                self.assertEqual(1, len(title_lefts))
+                self.assertEqual(1, len(date_widths))
+                self.assertEqual(0, window.list_widget.horizontalScrollBar().maximum())
 
     def test_list_refresh_preserves_selection_scroll_and_full_details(self):
         events = [replace(self.event, id=index, title=f"일정 {index}") for index in range(1, 61)]

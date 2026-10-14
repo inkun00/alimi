@@ -32,7 +32,7 @@ from PyQt5.QtWidgets import (
 )
 
 from .core import Event, Store, parse_schedule_text, format_event_date
-from .desktop import NoteWindow, DesktopListWindow, format_event_deadline
+from .desktop import DEADLINE_ROLE, NoteWindow, DesktopListWindow, format_event_deadline
 from .capture import CaptureNotepad, MimeTextEdit
 from .review import ImportReviewDialog
 from .layout import arrange_rectangles
@@ -1875,7 +1875,11 @@ def smoke_test(app, window, store, report_path: Path):
         app.processEvents()
         listing = window.desktop_list
         report["checks"]["list_mode_is_independent_and_bottom"] = bool(listing and listing.parent() is None and listing.isVisible() and listing.windowFlags() & Qt.WindowStaysOnBottomHint and not window.notes)
-        report["checks"]["list_mode_titles_only"] = bool(listing and not listing.details_panel.isVisible() and [listing.list_widget.item(i).text() for i in range(listing.list_widget.count())] == [e.title for e in store.reminder_events()])
+        report["checks"]["list_mode_dates_and_titles"] = bool(
+            listing and not listing.details_panel.isVisible() and
+            [(listing.list_widget.item(i).data(DEADLINE_ROLE), listing.list_widget.item(i).text())
+             for i in range(listing.list_widget.count())] ==
+            [(format_event_deadline(e), e.title) for e in store.reminder_events()])
         report["checks"]["list_mode_scrollbar"] = bool(listing and listing.list_widget.verticalScrollBarPolicy() != Qt.ScrollBarAlwaysOff)
         if listing:
             today_row = next(i for i in range(listing.list_widget.count()) if listing.list_widget.item(i).data(Qt.UserRole) == event.id)
