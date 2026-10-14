@@ -1539,7 +1539,7 @@ class MainWindow(QMainWindow):
 
 def smoke_test(app, window, store, report_path: Path):
     report = {"success": False, "version": APP_VERSION, "checks": {}}
-    def close_with_answer(widget, answer, button=None):
+    def close_with_answer(widget, answer, button=None, activate=None):
         def respond():
             box = app.activeModalWidget()
             if isinstance(box, QMessageBox):
@@ -1548,7 +1548,7 @@ def smoke_test(app, window, store, report_path: Path):
                     box.grab().save(str(warning_path))
                 box.button(answer).click()
         QTimer.singleShot(0, respond)
-        (button.click if button else widget.close)()
+        (activate or (button.click if button else widget.close))()
         app.processEvents()
     try:
         event = store.upsert_event(Event(title="실행 검증 일정", start_date=date.today().isoformat(),
@@ -1582,9 +1582,10 @@ def smoke_test(app, window, store, report_path: Path):
         report["checks"]["always_visible_desktop_notepad"] = capture.parent() is None and capture.isVisible() and not capture.editor.isReadOnly()
         report["checks"]["desktop_notepad_starts_as_icon"] = capture.collapsed and capture.icon_button.isVisible() and not capture.editor.isVisible() and not capture.isMinimized()
         report["checks"]["notepad_icon_is_not_cropped"] = (
-            capture.width() == 72 and capture.height() == 96 and
+            capture.width() == 72 and capture.height() == 70 and
             capture.icon_button.height() >= capture.icon_button.iconSize().height())
-        report["checks"]["notepad_icon_has_close_button"] = capture.icon_close_button.isVisible()
+        report["checks"]["notepad_icon_has_no_close_button"] = (
+            capture.compact_panel.findChildren(QPushButton) == [capture.icon_button])
         report["checks"]["notepad_always_on_top"] = (
             bool(capture.windowHandle().flags() & Qt.WindowStaysOnTopHint) and
             not bool(capture.windowHandle().flags() & Qt.WindowStaysOnBottomHint))
@@ -1601,6 +1602,30 @@ def smoke_test(app, window, store, report_path: Path):
         icon_position = QPoint(capture.pos())
         capture.grab().save(str(report_path.with_name(report_path.stem + "-notepad-icon.png")))
         from PyQt5.QtTest import QTest
+        from PyQt5.QtGui import QContextMenuEvent
+        def open_icon_menu():
+            point = QPoint(36, 35)
+            QApplication.sendEvent(capture.icon_button, QContextMenuEvent(
+                QContextMenuEvent.Mouse, point, capture.icon_button.mapToGlobal(point)))
+            app.processEvents()
+        open_icon_menu()
+        report["checks"]["notepad_icon_right_click_opens_close_menu"] = (
+            capture.icon_menu.isVisible() and capture.icon_close_action.text() == "닫기")
+        capture.icon_menu.grab().save(str(report_path.with_name(report_path.stem + "-notepad-menu.png")))
+        def click_menu_close():
+            QTest.mouseClick(capture.icon_menu, Qt.LeftButton,
+                             pos=capture.icon_menu.actionGeometry(capture.icon_close_action).center())
+        close_with_answer(capture, QMessageBox.Cancel, activate=click_menu_close)
+        report["checks"]["icon_menu_close_cancel_preserves_icon"] = (
+            capture.isVisible() and capture.collapsed and not capture.dismissed)
+        open_icon_menu()
+        close_with_answer(capture, QMessageBox.Ok, activate=click_menu_close)
+        window.sync_notes()
+        report["checks"]["icon_menu_close_confirmation_stays_closed"] = (
+            capture.dismissed and not capture.isVisible())
+        window.show_capture_notepad(expand=True)
+        capture.set_collapsed(True)
+        app.processEvents()
         QTest.mouseDClick(capture.icon_button, Qt.LeftButton)
         app.processEvents()
         report["checks"]["icon_double_click_opens_editor"] = not capture.collapsed and capture.editor.isVisible() and capture.minimize_button.isVisible()

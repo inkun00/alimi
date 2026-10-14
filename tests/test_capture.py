@@ -11,9 +11,9 @@ import onnxruntime
 onnxruntime.disable_telemetry_events()
 
 from PyQt5.QtCore import QEvent, QMimeData, QPoint, QPointF, Qt, QUrl
-from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QImage, QMouseEvent, QTextCursor
+from PyQt5.QtGui import QContextMenuEvent, QDragEnterEvent, QDropEvent, QImage, QMouseEvent, QTextCursor
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication, QLabel, QMessageBox
+from PyQt5.QtWidgets import QApplication, QLabel, QMessageBox, QPushButton
 
 from alimi.capture import CaptureNotepad
 
@@ -69,7 +69,7 @@ class DesktopCaptureTests(unittest.TestCase):
             window.show()
             self.app.processEvents()
             self.assertTrue(window.collapsed)
-            self.assertEqual((72, 96), (window.width(), window.height()))
+            self.assertEqual((72, 70), (window.width(), window.height()))
             self.assertTrue(window.icon_button.isVisible())
             self.assertFalse(window.editor.isVisible())
             self.assertFalse(window.isMinimized())
@@ -78,14 +78,16 @@ class DesktopCaptureTests(unittest.TestCase):
         finally:
             window.finish()
 
-    def test_icon_keeps_paper_hitbox_with_visible_close_button_and_opaque_memo(self):
+    def test_icon_has_only_paper_hitbox_and_expanded_memo_keeps_close_button(self):
         self.window.set_collapsed(True)
         self.app.processEvents()
         original_handle = int(self.window.winId())
         self.assertTrue(self.window.testAttribute(Qt.WA_TranslucentBackground))
         self.assertEqual("", self.window.icon_button.text())
         self.assertEqual([], self.window.compact_panel.findChildren(QLabel))
-        self.assertTrue(self.window.icon_close_button.isVisible())
+        self.assertEqual([self.window.icon_button],
+                         self.window.compact_panel.findChildren(QPushButton))
+        self.assertEqual([], self.window.compact_panel.findChildren(QPushButton, "closeTool"))
         self.assertFalse(self.window.close_button.isVisible())
         self.assertIn("일정 메모장", self.window.icon_button.accessibleName())
         self.assertIn("더블클릭", self.window.icon_button.toolTip())
@@ -103,7 +105,6 @@ class DesktopCaptureTests(unittest.TestCase):
         self.window.expand_notepad()
         self.app.processEvents()
         self.assertTrue(self.window.close_button.isVisible())
-        self.assertFalse(self.window.icon_close_button.isVisible())
         expanded = self.window.grab().toImage()
         self.assertEqual(original_handle, int(self.window.winId()))
         self.assertEqual(255, expanded.pixelColor(2, 2).alpha())
@@ -123,7 +124,7 @@ class DesktopCaptureTests(unittest.TestCase):
         try:
             self.app.setStyleSheet(STYLE)
             window = CaptureNotepad("배경 없이 전체 아이콘 표시")
-            self.assertEqual((72, 96), (window.width(), window.height()))
+            self.assertEqual((72, 70), (window.width(), window.height()))
             window.show()
             self.app.processEvents()
             icon_origin = window.icon_button.mapTo(window, QPoint(0, 0))
@@ -143,10 +144,9 @@ class DesktopCaptureTests(unittest.TestCase):
             self.app.processEvents()
             window.set_collapsed(True)
             self.app.processEvents()
-            self.assertEqual((72, 96), (window.width(), window.height()))
+            self.assertEqual((72, 70), (window.width(), window.height()))
             self.assertEqual((72, 70), (window.icon_button.width(), window.icon_button.height()))
-            self.assertTrue(window.icon_close_button.isVisible())
-            self.assertFalse(window.icon_close_button.geometry().intersects(window.icon_button.geometry()))
+            self.assertEqual([window.icon_button], window.compact_panel.findChildren(QPushButton))
         finally:
             if window is not None:
                 window.finish()
@@ -177,30 +177,112 @@ class DesktopCaptureTests(unittest.TestCase):
             self.assertTrue(self.window.windowHandle().flags() & Qt.WindowStaysOnTopHint)
             self.assertFalse(self.window.windowHandle().flags() & Qt.WindowStaysOnBottomHint)
 
-    def test_each_close_button_warns_cancel_preserves_and_ok_dismisses(self):
+    def test_expanded_close_button_warns_cancel_preserves_and_ok_dismisses(self):
         dismissed = []
         self.window.dismissed_by_user.connect(lambda: dismissed.append(True))
-        for collapsed in (True, False):
-            self.window.set_collapsed(collapsed)
-            button = self.window.icon_close_button if collapsed else self.window.close_button
-            self.assertTrue(button.isVisible())
-            self.assertEqual("닫기", button.accessibleName())
-            self.assertEqual("닫기", button.toolTip())
-            self.assertEqual((28, 26), (button.width(), button.height()))
-            self.warning.reset_mock()
-            button.click()
-            self.warning.assert_called_once()
-            self.assertEqual(QMessageBox.Cancel, self.warning.call_args.args[-1])
-            self.assertTrue(self.window.isVisible())
-            self.assertFalse(self.window.dismissed)
-            self.assertEqual("기존 메모", self.window.editor.toPlainText())
-            self.assertEqual([], dismissed)
+        button = self.window.close_button
+        self.assertTrue(button.isVisible())
+        self.assertEqual("닫기", button.accessibleName())
+        self.assertEqual("닫기", button.toolTip())
+        self.assertEqual((28, 26), (button.width(), button.height()))
+        button.click()
+        self.warning.assert_called_once()
+        self.assertEqual(QMessageBox.Cancel, self.warning.call_args.args[-1])
+        self.assertTrue(self.window.isVisible())
+        self.assertFalse(self.window.dismissed)
+        self.assertEqual("기존 메모", self.window.editor.toPlainText())
+        self.assertEqual([], dismissed)
         self.warning.return_value = QMessageBox.Ok
         self.window.close_button.click()
         self.assertFalse(self.window.isVisible())
         self.assertTrue(self.window.dismissed)
         self.assertEqual([True], dismissed)
         self.assertEqual("기존 메모", self.window.editor.toPlainText())
+
+    def open_icon_context_menu(self, widget, reason=QContextMenuEvent.Mouse):
+        point = QPoint(36, 30)
+        event = QContextMenuEvent(reason, point, widget.mapToGlobal(point))
+        self.app.sendEvent(widget, event)
+        self.app.processEvents()
+        self.assertTrue(self.window.icon_menu.isVisible())
+        self.assertEqual(["닫기"], [action.text() for action in self.window.icon_menu.actions()])
+        self.assertTrue(self.window.collapsed)
+        return self.window.icon_menu
+
+    def test_icon_context_popup_and_escape_preserve_notepad_state(self):
+        self.window.editor.moveCursor(QTextCursor.End)
+        self.window.editor.insertPlainText(" 초안")
+        cursor_position = self.window.editor.textCursor().position()
+        self.window.set_busy(True)
+        self.window.set_collapsed(True)
+        self.window.move(200, 160)
+        geometry = self.window.geometry()
+        view_changes, moves, dismissed = [], [], []
+        self.window.view_changed.connect(view_changes.append)
+        self.window.moved.connect(lambda x, y: moves.append((x, y)))
+        self.window.dismissed_by_user.connect(lambda: dismissed.append(True))
+        draft_changes = list(self.drafts)
+        for widget in (self.window.icon_button, self.window.compact_panel):
+            menu = self.open_icon_context_menu(widget)
+            QTest.keyClick(menu, Qt.Key_Escape)
+            self.app.processEvents()
+            self.assertFalse(menu.isVisible())
+            self.assertTrue(self.window.isVisible())
+            self.assertFalse(self.window.dismissed)
+            self.assertEqual(geometry, self.window.geometry())
+            self.assertEqual(cursor_position, self.window.editor.textCursor().position())
+            self.assertEqual("기존 메모 초안", self.window.editor.toPlainText())
+            self.assertFalse(self.window.review_button.isEnabled())
+            self.assertEqual(draft_changes, self.drafts)
+        self.warning.assert_not_called()
+        self.assertEqual([], view_changes)
+        self.assertEqual([], moves)
+        self.assertEqual([], dismissed)
+        self.assertEqual([], self.payloads)
+        self.window.expand_notepad()
+        self.window.editor.undo()
+        self.assertEqual("기존 메모", self.window.editor.toPlainText())
+
+    def test_icon_menu_close_warns_cancel_preserves_and_ok_dismisses(self):
+        self.window.set_collapsed(True)
+        dismissed = []
+        self.window.dismissed_by_user.connect(lambda: dismissed.append(True))
+        for response in (QMessageBox.Cancel, QMessageBox.Ok):
+            self.warning.return_value = response
+            self.warning.reset_mock()
+            menu = self.open_icon_context_menu(self.window.icon_button)
+            QTest.mouseClick(menu, Qt.LeftButton,
+                             pos=menu.actionGeometry(self.window.icon_close_action).center())
+            self.app.processEvents()
+            self.warning.assert_called_once()
+            self.assertEqual(QMessageBox.Cancel, self.warning.call_args.args[-1])
+            self.assertFalse(menu.isVisible())
+            self.assertTrue(self.window.collapsed)
+            self.assertEqual("기존 메모", self.window.editor.toPlainText())
+            self.assertEqual([], self.payloads)
+            self.assertEqual([], self.drafts)
+            self.assertEqual(response == QMessageBox.Cancel, self.window.isVisible())
+            self.assertEqual(response == QMessageBox.Ok, self.window.dismissed)
+            self.assertEqual([] if response == QMessageBox.Cancel else [True], dismissed)
+
+    def test_icon_keyboard_context_menu_close_can_be_cancelled(self):
+        self.window.set_collapsed(True)
+        self.window.activateWindow()
+        self.window.icon_button.setFocus()
+        self.app.processEvents()
+        menu = self.open_icon_context_menu(self.window.icon_button, QContextMenuEvent.Keyboard)
+        QTest.keyClick(menu, Qt.Key_Down)
+        self.assertIs(self.window.icon_close_action, menu.activeAction())
+        QTest.keyClick(menu, Qt.Key_Return)
+        self.app.processEvents()
+        self.warning.assert_called_once()
+        self.assertFalse(menu.isVisible())
+        self.assertTrue(self.window.isVisible())
+        self.assertTrue(self.window.collapsed)
+        self.assertFalse(self.window.dismissed)
+        self.assertEqual("기존 메모", self.window.editor.toPlainText())
+        self.assertEqual([], self.payloads)
+        self.assertEqual([], self.drafts)
 
     def test_programmatic_finish_never_prompts_or_marks_user_dismissal(self):
         window = CaptureNotepad("종료할 때도 보존")

@@ -7,7 +7,7 @@ from pathlib import Path
 from PyQt5.QtCore import QEvent, QPoint, QSize, QSignalBlocker, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygon
 from PyQt5.QtWidgets import (
-    QApplication, QHBoxLayout, QLabel, QPushButton, QShortcut, QTextEdit,
+    QApplication, QHBoxLayout, QLabel, QMenu, QPushButton, QShortcut, QTextEdit,
     QVBoxLayout, QWidget,
 )
 
@@ -182,13 +182,6 @@ QScrollBar::handle:vertical { background: #b8a568; min-height: 24px; border-radi
         compact_layout = QVBoxLayout(self.compact_panel)
         compact_layout.setContentsMargins(0, 0, 0, 0)
         compact_layout.setSpacing(0)
-        compact_header = QHBoxLayout()
-        compact_header.setContentsMargins(0, 0, 0, 0)
-        compact_header.setSpacing(0)
-        compact_header.addStretch(1)
-        self.icon_close_button = self._make_close_button(self.compact_panel)
-        compact_header.addWidget(self.icon_close_button)
-        compact_layout.addLayout(compact_header)
         self.icon_button = QPushButton(self.compact_panel)
         self.icon_button.setObjectName("notepadIcon")
         self.icon_button.setIcon(_notepad_icon())
@@ -196,9 +189,15 @@ QScrollBar::handle:vertical { background: #b8a568; min-height: 24px; border-radi
         self.icon_button.setFixedSize(72, 70)
         self.icon_button.setAcceptDrops(True)
         self.icon_button.setAccessibleName("일정 메모장 열기")
-        self.icon_button.setAccessibleDescription("더블클릭 또는 Enter, Space로 메모장을 펼칩니다. 드래그해서 이동합니다.")
-        self.icon_button.setToolTip("더블클릭하면 일정 메모장을 엽니다.\n드래그해서 이동하거나 파일을 끌어 놓으세요.")
+        self.icon_button.setAccessibleDescription("더블클릭 또는 Enter, Space로 메모장을 펼칩니다. 드래그해서 이동합니다. 오른쪽 클릭 메뉴에서 닫을 수 있습니다.")
+        self.icon_button.setToolTip("더블클릭하면 일정 메모장을 엽니다.\n드래그해서 이동하거나 파일을 끌어 놓으세요.\n오른쪽 클릭 메뉴에서 닫을 수 있습니다.")
         self.icon_button.clicked.connect(self.expand_notepad)
+        self.icon_menu = QMenu(self)
+        self.icon_close_action = self.icon_menu.addAction("닫기", self.close)
+        for target in (self.icon_button, self.compact_panel):
+            target.setContextMenuPolicy(Qt.CustomContextMenu)
+            target.customContextMenuRequested.connect(
+                lambda point, widget=target: self.icon_menu.popup(widget.mapToGlobal(point)))
         compact_layout.addWidget(self.icon_button, 0, Qt.AlignHCenter)
         layout.addWidget(self.compact_panel)
 
@@ -288,7 +287,7 @@ QScrollBar::handle:vertical { background: #b8a568; min-height: 24px; border-radi
             # The application's button stylesheet can repolish the child and
             # resize it before its first layout. Use the icon view's intended
             # bounds, rather than copying that temporary child geometry.
-            self.setFixedSize(72, 96)
+            self.setFixedSize(72, 70)
         else:
             self.compact_panel.hide()
             self.expanded_panel.show()
