@@ -869,8 +869,14 @@ class MainWindow(QMainWindow):
         if self.jobs:
             QMessageBox.information(self, "자료 분석 중", "자료 분석이 끝난 뒤 종료해 주세요.")
             return
-        if self.store.reminder_events():
-            QMessageBox.information(self, "미완료 일정", "미완료 일정이 남아 있어 알리미를 종료할 수 없습니다. 도구의 닫기는 일정 완료 처리가 아닙니다. 관리 창과 바탕화면 도구는 닫아도 트레이에서 계속 실행됩니다.")
+        try:
+            # Schedules are committed when registered or edited. Flush the
+            # draft before exiting, including text still in its debounce timer.
+            self.save_capture_draft()
+            icon_position = self.capture_icon_position or self.capture_notepad.pos()
+            self.save_capture_position(icon_position.x(), icon_position.y())
+        except Exception as exc:
+            self.show_error("종료 전 메모장 상태를 로컬에 저장하지 못해 종료하지 않았습니다.\n" + str(exc))
             return
         QApplication.instance().setProperty("shutting_down", True)
         QApplication.instance().quit()
@@ -1096,8 +1102,9 @@ class MainWindow(QMainWindow):
             self._arranging_desktop = False
 
     def sync_notes(self):
-        if not QApplication.instance().property("shutting_down"):
-            self.show_capture_notepad()
+        if QApplication.instance().property("shutting_down"):
+            return
+        self.show_capture_notepad()
         try:
             self.schedule_midnight()
             self.today_label.setText("오늘 날짜: " + date.today().isoformat())
@@ -2065,6 +2072,35 @@ def smoke_test(app, window, store, report_path: Path):
             store.get_event(history_edit.id).status == "open" and
             store.get_event(history_other.id).status == "done" and
             window.history_table.currentRow() == -1)
+        from dataclasses import asdict
+        def persistent_events(repository):
+            return [{key: value for key, value in asdict(event).items() if key not in ("x", "y")}
+                    for event in repository.list_events()]
+        before_exit = persistent_events(store)
+        unfinished_before_exit = any(event["status"] == "open" for event in before_exit)
+        exit_draft = "트레이 종료 직전 입력한 로컬 보존 검증 초안"
+        window.capture_notepad.editor.setPlainText(exit_draft)
+        exit_action = next(action for action in window.tray.contextMenu().actions()
+                           if action.text() == "알리미 종료")
+        exit_timeout = {"fired": False}
+        watchdog = QTimer()
+        watchdog.setSingleShot(True)
+        def stop_failed_exit():
+            exit_timeout["fired"] = True
+            app.quit()
+        watchdog.timeout.connect(stop_failed_exit)
+        watchdog.start(5000)
+        QTimer.singleShot(0, exit_action.trigger)
+        app.exec_()
+        watchdog.stop()
+        report["checks"]["tray_exit_accepts_unfinished_events"] = (
+            unfinished_before_exit and app.property("shutting_down") and not exit_timeout["fired"])
+        reloaded = Store(store.path)
+        try:
+            report["checks"]["tray_exit_preserves_local_events_and_status"] = persistent_events(reloaded) == before_exit
+            report["checks"]["tray_exit_flushes_recent_local_draft"] = reloaded.get_setting("capture_draft") == exit_draft
+        finally:
+            reloaded.close()
         report["success"] = all(report["checks"].values())
     except Exception:
         report["error"] = traceback.format_exc()

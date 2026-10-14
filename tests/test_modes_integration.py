@@ -912,12 +912,116 @@ class DesktopModeIntegrationTests(unittest.TestCase):
             self.assertFalse(reopened.editor.isVisible())
             self.assertEqual(anchor, reopened.pos())
             self.assertEqual(text, reopened.editor.toPlainText())
+
             self.assertEqual(text, self.store.get_setting("capture_draft"))
             self.assertEqual([], self.store.list_events())
             QTest.mouseDClick(reopened.icon_button, Qt.LeftButton)
             self.pump()
             self.assertTrue(reopened.editor.isVisible())
             self.assertEqual(text, reopened.editor.toPlainText())
+
+    def test_tray_quit_preserves_all_schedule_states_and_recent_draft_on_database_restart(self):
+        events = [self.store.upsert_event(Event(
+            title=title, start_date=when, notes="종료와 재실행 후에도 보존", source="종료 검증"))
+            for title, when in (("지난 미완료 일정", "2000-01-01"),
+                                ("미래 미완료 일정", "2099-12-31"))]
+        month = self.store.upsert_event(Event(
+            title="미완료 월 일정", start_date="2099-12-01", end_date="2099-12-31",
+            date_precision="month", source="월 일정 원문", source_text="2099년 12월 평가"))
+        review = self.store.upsert_event(Event(title="날짜 확인 필요", status="review"))
+        done = self.store.upsert_event(Event(title="이미 완료한 일정", start_date="2000-01-01"))
+        self.store.complete_event(done.id)
+        expected_ids = {month.id, *(event.id for event in events)}
+        expected = [replace(event, x=None, y=None) for event in self.store.list_events()]
+
+        for mode_index, mode in ((0, "sticky"), (1, "list")):
+            with self.subTest(mode=mode):
+                self.window.mode_combo.setCurrentIndex(mode_index)
+                self.window.refresh()
+                self.pump()
+                capture = self.window.capture_notepad
+                draft = f"2099년 10월 15일 {mode} 모드 종료 직전 작성한 초안"
+                capture.editor.setPlainText(draft)
+                self.assertTrue(self.window.draft_timer.isActive())
+                self.assertNotEqual(draft, self.store.get_setting("capture_draft", ""))
+                anchor = self.window.capture_icon_position
+                action = next(action for action in self.window.tray.contextMenu().actions()
+                              if action.text() == "알리미 종료")
+                with patch.object(self.app, "quit") as quit_app, \
+                     patch("alimi.app.QMessageBox.information") as information, \
+                     patch("alimi.app.QMessageBox.warning") as warning:
+                    action.trigger()
+                quit_app.assert_called_once_with()
+                information.assert_not_called()
+                warning.assert_not_called()
+                self.assertTrue(self.app.property("shutting_down"))
+                self.assertEqual(draft, self.store.get_setting("capture_draft"))
+                self.assertEqual(str(anchor.x()), self.store.get_setting("capture_x"))
+                self.assertEqual(str(anchor.y()), self.store.get_setting("capture_y"))
+
+                # Reopen the actual SQLite file through a fresh connection;
+                # recreating widgets on the old Store alone would miss lost commits.
+                self.destroy_window(self.window)
+                self.store.close()
+                self.store = Store(self.data_dir / "alimi.sqlite3")
+                self.window = self.make_window()
+                self.pump()
+                self.assertEqual(expected, [replace(event, x=None, y=None)
+                                            for event in self.store.list_events()])
+                self.assertEqual(mode, self.window.desktop_mode)
+                self.assertEqual(draft, self.window.capture_notepad.editor.toPlainText())
+                self.assertEqual(anchor, self.window.capture_notepad.pos())
+                if mode == "sticky":
+                    self.assertEqual(expected_ids, set(self.window.notes))
+                    self.assertTrue(all(note.isVisible() for note in self.window.notes.values()))
+                else:
+                    self.assertEqual(expected_ids, set(self.window.desktop_list.events))
+                    self.assertTrue(self.window.desktop_list.isVisible())
+                self.assertEqual(review.id, self.window.review_table.item(0, 0).data(Qt.UserRole))
+                self.assertEqual(done.id, self.window.history_table.item(0, 0).data(Qt.UserRole))
+                self.assertEqual([], self.errors)
+
+    def test_tray_quit_aborts_if_recent_draft_cannot_be_saved(self):
+        event = self.add_due(1)[0]
+        draft = "2099년 10월 15일 저장에 실패한 초안"
+        self.window.capture_notepad.editor.setPlainText(draft)
+        with patch.object(self.window, "save_capture_draft", side_effect=OSError("저장 검증 실패")), \
+             patch.object(self.app, "quit") as quit_app:
+            self.window.request_quit()
+        quit_app.assert_not_called()
+        self.assertFalse(self.app.property("shutting_down"))
+        self.assertTrue(self.window.capture_notepad.isVisible())
+        self.assertEqual(draft, self.window.capture_notepad.editor.toPlainText())
+        self.assertEqual("open", self.store.get_event(event.id).status)
+        self.assertEqual(1, len(self.errors))
+        self.assertIn("종료하지 않았습니다", self.errors[0])
+
+    def test_tray_quit_aborts_if_icon_position_cannot_be_saved(self):
+        draft = "2099년 10월 15일 종료 실패 후에도 남는 초안"
+        self.window.capture_notepad.editor.setPlainText(draft)
+        with patch.object(self.window, "save_capture_position", side_effect=OSError("위치 저장 검증 실패")), \
+             patch.object(self.app, "quit") as quit_app:
+            self.window.request_quit()
+        quit_app.assert_not_called()
+        self.assertFalse(self.app.property("shutting_down"))
+        self.assertTrue(self.window.capture_notepad.isVisible())
+        self.assertEqual(draft, self.store.get_setting("capture_draft"))
+        self.assertEqual(1, len(self.errors))
+        self.assertIn("종료하지 않았습니다", self.errors[0])
+
+    def test_tray_quit_still_waits_for_active_document_analysis(self):
+        task = object()
+        self.window.jobs.add(task)
+        try:
+            with patch.object(self.app, "quit") as quit_app, \
+                 patch("alimi.app.QMessageBox.information") as information:
+                self.window.request_quit()
+            quit_app.assert_not_called()
+            self.assertFalse(self.app.property("shutting_down"))
+            information.assert_called_once()
+            self.assertEqual("자료 분석 중", information.call_args.args[1])
+        finally:
+            self.window.jobs.discard(task)
 
     def test_expansion_near_bottom_right_clamps_editor_and_restores_saved_icon_anchor(self):
         area = QRect(100, 50, 1920, 1080)
