@@ -365,6 +365,7 @@ class MainWindow(QMainWindow):
         self._dismissed_note_ids: set[int] = set()
         self._desktop_list_dismissed = False
         self._confirming_close = False
+        self._confirming_completion = False
         self._daily_backup_pending = False
         self._daily_backup_retry_at = 0.0
         self._startup_refresh_remaining = 5 if args.background else 0
@@ -1273,7 +1274,58 @@ class MainWindow(QMainWindow):
             self.status_label.setText("메모 위치를 저장하지 못했습니다.")
 
     def complete_event(self, id_):
+        if (QApplication.instance().property("shutting_down")
+                or self._confirming_completion):
+            return
+        self._confirming_completion = True
+        confirmation = None
         try:
+            event = self.store.get_event(id_)
+            if event is None or event.status != "open":
+                return
+            # Snapshot the requested ID before the modal loop. A refresh or a
+            # list selection change must not complete a different schedule.
+            id_ = int(event.id)
+            parent = self.sender()
+            if not isinstance(parent, QWidget) or not parent.isVisible():
+                parent = self.notes.get(id_)
+                if parent is None or not parent.isVisible():
+                    parent = self.desktop_list
+                if parent is None or not parent.isVisible():
+                    parent = self
+            timing = format_event_date(event, include_year=True)
+            if (event.date_precision != "month" and event.end_date
+                    and event.end_date != event.start_date):
+                timing += " ~ " + event.end_date
+            if event.time:
+                timing += " · " + event.time
+            confirmation = QMessageBox(
+                QMessageBox.Question, "일정 완료 확인",
+                f"다음 일정을 완료할까요?\n\n{event.title}\n일정: {timing}\n\n"
+                "완료한 일정은 완료 기록에서 되돌릴 수 있습니다.",
+                QMessageBox.Ok | QMessageBox.Cancel, parent,
+            )
+            confirmation.setTextFormat(Qt.PlainText)
+            confirmation.button(QMessageBox.Ok).setText("완료")
+            confirmation.button(QMessageBox.Cancel).setText("취소")
+            confirmation.setDefaultButton(QMessageBox.Cancel)
+            confirmation.setEscapeButton(QMessageBox.Cancel)
+            confirmation.setWindowModality(Qt.ApplicationModal)
+            confirmation.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            if confirmation.exec_() != QMessageBox.Ok:
+                return
+            if QApplication.instance().property("shutting_down"):
+                return
+            current = self.store.get_event(id_)
+            if current is None or current.status != "open":
+                return
+            confirmation_fields = ("title", "start_date", "end_date", "date_precision",
+                                   "time", "place", "notes")
+            if any(getattr(current, field) != getattr(event, field)
+                   for field in confirmation_fields):
+                self.status_label.setText(
+                    "확인 중 일정 내용이 변경되어 완료하지 않았습니다. 변경된 내용을 확인한 뒤 다시 완료해 주세요.")
+                return
             self.store.complete_event(id_)
             self._dismissed_note_ids.discard(id_)
             if id_ in self.notes:
@@ -1282,6 +1334,14 @@ class MainWindow(QMainWindow):
             self.status_label.setText("완료 처리했습니다. 완료 기록에서 되돌릴 수 있습니다.")
         except Exception as exc:
             self.show_error("완료 상태를 저장하지 못했습니다. 메모를 유지합니다.\n" + str(exc))
+        finally:
+            self._confirming_completion = False
+            if confirmation is not None:
+                try:
+                    confirmation.deleteLater()
+                except RuntimeError:
+                    # A parent tool can be destroyed during application exit.
+                    pass
 
     def add_manual(self):
         dialog = EventDialog(parent=self)
@@ -1699,6 +1759,21 @@ def smoke_test(app, window, store, report_path: Path):
         QTimer.singleShot(0, respond)
         (activate or (button.click if button else widget.close))()
         app.processEvents()
+    def complete_with_answer(button, answer):
+        observed = {}
+        def respond():
+            box = app.activeModalWidget()
+            if isinstance(box, QMessageBox):
+                observed.update(visible=box.isVisible(), text=box.text(),
+                                default_cancel=box.defaultButton() is box.button(QMessageBox.Cancel),
+                                escape_cancel=box.escapeButton() is box.button(QMessageBox.Cancel),
+                                complete_label=box.button(QMessageBox.Ok).text())
+                box.grab().save(str(report_path.with_name(report_path.stem + "-completion-confirmation.png")))
+                box.button(answer).click()
+        QTimer.singleShot(0, respond)
+        button.click()
+        app.processEvents()
+        return observed
     try:
         event = store.upsert_event(Event(title="실행 검증 일정", start_date=date.today().isoformat(),
                                         time="15:30", place="테스트 회의실", source="실행 검증"))
@@ -1812,9 +1887,16 @@ def smoke_test(app, window, store, report_path: Path):
             not note.isVisible() and store.get_event(event.id).status == "open")
         window.restore_desktop_tools()
         report["checks"]["note_reopens_from_tray_action"] = note.isVisible() and not note.dismissed
-        note.title_label.click()
-        note.complete_button.click()
-        app.processEvents()
+        note.set_expanded(True)
+        cancel_completion = complete_with_answer(note.complete_button, QMessageBox.Cancel)
+        report["checks"]["sticky_completion_requires_confirmation_with_default_cancel"] = (
+            cancel_completion.get("visible") and cancel_completion.get("default_cancel") and
+            cancel_completion.get("escape_cancel") and cancel_completion.get("complete_label") == "완료" and
+            event.title in cancel_completion.get("text", "") and event.start_date in cancel_completion.get("text", ""))
+        report["checks"]["sticky_completion_cancel_preserves_unfinished_and_details"] = (
+            store.get_event(event.id).status == "open" and note.isVisible() and note.expanded and
+            event.id in window.notes)
+        complete_with_answer(note.complete_button, QMessageBox.Ok)
         report["checks"]["complete_saved"] = store.get_event(event.id).status == "done"
         report["checks"]["complete_removes_note"] = int(event.id) not in window.notes
         store.reopen_event(event.id)
@@ -1965,7 +2047,8 @@ def smoke_test(app, window, store, report_path: Path):
         test_id = int(test_events[0].id)
         window.test_postit_button.click()
         report["checks"]["test_button_no_duplicate"] = len([e for e in store.list_events() if e.source == TEST_NOTE_SOURCE]) == 1
-        window.complete_event(test_id)
+        window.notes[test_id].set_expanded(True)
+        complete_with_answer(window.notes[test_id].complete_button, QMessageBox.Ok)
         window.test_postit_button.click()
         report["checks"]["completed_test_can_be_shown_again"] = test_id in window.notes and store.get_event(test_id).status == "open"
         monthly = parse_schedule_text("2026학년도 평가 계획\n9월, 10월 국어 평가")
@@ -2096,6 +2179,20 @@ def smoke_test(app, window, store, report_path: Path):
             report["checks"]["list_close_stays_closed_after_refresh"] = not listing.isVisible()
             window.restore_desktop_tools()
             report["checks"]["list_reopens_from_tray_action"] = listing.isVisible()
+            list_target = listing.selected_event_id
+            cancel_completion = complete_with_answer(listing.complete_button, QMessageBox.Cancel)
+            report["checks"]["list_completion_cancel_preserves_selection_and_details"] = (
+                cancel_completion.get("visible") and cancel_completion.get("default_cancel") and
+                cancel_completion.get("escape_cancel") and store.get_event(list_target).status == "open" and
+                listing.selected_event_id == list_target and listing.details_panel.isVisible() and
+                list_target in listing.events)
+            complete_with_answer(listing.complete_button, QMessageBox.Ok)
+            report["checks"]["list_completion_confirmation_saves_only_selected_event"] = (
+                store.get_event(list_target).status == "done" and list_target not in listing.events and
+                {event.id for event in store.reminder_events()} == remaining_ids - {list_target})
+            store.reopen_event(list_target)
+            window.sync_notes()
+            report["checks"]["list_confirmed_completion_can_be_undone"] = set(listing.events) == remaining_ids
         window.mode_combo.setCurrentIndex(0)
         app.processEvents()
         report["checks"]["mode_switch_preserves_all_events"] = window.desktop_list is None and set(window.notes) == remaining_ids

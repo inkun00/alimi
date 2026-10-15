@@ -597,7 +597,8 @@ class DesktopModeIntegrationTests(unittest.TestCase):
                 colors.append(note.urgency_state.background)
         self.assertEqual(4, len(set(colors[:4])), "Each day before the deadline needs a distinct color.")
         self.assertEqual(colors[3], colors[4], "Overdue reminders retain the deadline color until completion.")
-        with self.freeze_today(deadline + timedelta(days=1)):
+        with self.freeze_today(deadline + timedelta(days=1)), \
+                patch("alimi.app.QMessageBox.exec_", return_value=QMessageBox.Ok):
             note.complete_button.click()
             self.pump()
             self.assertNotIn(event.id, self.window.notes)
@@ -644,7 +645,8 @@ class DesktopModeIntegrationTests(unittest.TestCase):
             self.assertEqual(upcoming.id, row.data(Qt.UserRole))
             self.assertEqual(event_urgency(upcoming, first_day + timedelta(days=1)).background,
                              row.background().color().name())
-            desktop.complete_button.click()
+            with patch("alimi.app.QMessageBox.exec_", return_value=QMessageBox.Ok):
+                desktop.complete_button.click()
             self.pump()
             self.assertNotIn(upcoming.id, desktop.events)
             self.assertEqual("done", self.store.get_event(upcoming.id).status)
@@ -1263,7 +1265,10 @@ class DesktopModeIntegrationTests(unittest.TestCase):
         self.window.test_postit_button.click()
         self.pump()
         test_event = next(event for event in self.store.list_events() if event.source == TEST_NOTE_SOURCE)
-        self.window.complete_event(test_event.id)
+        with patch("alimi.app.QMessageBox.exec_", return_value=QMessageBox.Ok):
+            self.window.complete_event(test_event.id)
+        self.assertEqual("done", self.store.get_event(test_event.id).status)
+        self.assertEqual([], self.errors)
         with patch("alimi.desktop.QMessageBox.warning", return_value=QMessageBox.Ok):
             desktop.close_button.click()
         self.assertFalse(desktop.isVisible())
@@ -1340,7 +1345,8 @@ class DesktopModeIntegrationTests(unittest.TestCase):
         self.window.sync_notes()
         self.pump()
         self.assertTrue(note.expanded, "A periodic refresh must preserve expanded details.")
-        note.complete_button.click()
+        with patch("alimi.app.QMessageBox.exec_", return_value=QMessageBox.Ok):
+            note.complete_button.click()
         self.pump()
         self.assertEqual("done", self.store.get_event(event.id).status)
         self.assertNotIn(event.id, self.window.notes)
@@ -1421,7 +1427,8 @@ class DesktopModeIntegrationTests(unittest.TestCase):
             desktop.close()
         self.pump()
         self.assertTrue(desktop.isVisible())
-        desktop.complete_button.click()
+        with patch("alimi.app.QMessageBox.exec_", return_value=QMessageBox.Ok):
+            desktop.complete_button.click()
         self.pump()
         self.assertEqual("done", self.store.get_event(monthly.id).status)
         self.assertEqual(16, desktop.list_widget.count())
@@ -1431,7 +1438,8 @@ class DesktopModeIntegrationTests(unittest.TestCase):
         event = self.add_due()[0]
         desktop = self.switch_to_list()
         self.click_list_row(desktop, 0)
-        with patch.object(self.store, "complete_event", side_effect=OSError("검증용 저장 실패")):
+        with patch.object(self.store, "complete_event", side_effect=OSError("검증용 저장 실패")), \
+                patch("alimi.app.QMessageBox.exec_", return_value=QMessageBox.Ok):
             desktop.complete_button.click()
             self.pump()
         self.assertEqual("open", self.store.get_event(event.id).status)
