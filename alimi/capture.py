@@ -145,9 +145,6 @@ class CaptureNotepad(_BottomWindow):
         self.setAcceptDrops(True)
         self.collapsed = False
         self._expanded_size = QSize(390, 360)
-        self._drag_start = None
-        self._drag_origin = None
-        self._dragging = False
         self.setStyleSheet("""
 QWidget#captureNotepad, QWidget#notepadCompact { background: transparent; border: none; }
 QWidget#notepadPaper { background: #fff2b6; border: 1px solid #dbc36b; }
@@ -278,6 +275,7 @@ QScrollBar::handle:vertical { background: #b8a568; min-height: 24px; border-radi
         collapsed = bool(collapsed)
         if collapsed == self.collapsed:
             return
+        self._finish_frame_drag()
         if collapsed:
             # The cursor and undo stack belong to the retained editor, not to
             # either visible panel. Hiding the panel leaves both untouched.
@@ -295,10 +293,6 @@ QScrollBar::handle:vertical { background: #b8a568; min-height: 24px; border-radi
             self.setMinimumSize(330, 285)
             self.resize(self._expanded_size)
         self.collapsed = collapsed
-        self._drag_start = None
-        self._drag_origin = None
-        self._dragging = False
-        self.drag_offset = None
         for shortcut in self._review_shortcuts:
             shortcut.setEnabled(not collapsed)
         if self.isVisible():
@@ -346,28 +340,17 @@ QScrollBar::handle:vertical { background: #b8a568; min-height: 24px; border-radi
                 self.toggle_collapsed()
                 return True
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
-                self._drag_start = event.globalPos()
-                self._drag_origin = self.pos()
-                self._dragging = False
+                self._begin_frame_drag(event)
                 if obj is self.icon_button:
                     self.icon_button.setFocus(Qt.MouseFocusReason)
                 return True
-            if event.type() == QEvent.MouseMove and self._drag_start is not None:
-                difference = event.globalPos() - self._drag_start
-                if difference.manhattanLength() >= QApplication.startDragDistance():
-                    self._dragging = True
-                if self._dragging:
-                    self.move(self._drag_origin + difference)
+            if event.type() == QEvent.MouseMove and self._move_frame_drag(event):
                 return True
-            if event.type() == QEvent.MouseButtonRelease and self._drag_start is not None:
-                moved = self._dragging
-                self._drag_start = None
-                self._drag_origin = None
-                self._dragging = False
-                if moved:
-                    self._emit_moved()
-                    self.keep_below_windows()
+            if (event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton
+                    and self._finish_frame_drag()):
                 return True
+            if event.type() == QEvent.UngrabMouse:
+                self._finish_frame_drag()
             if obj in (self.compact_panel, self.icon_button):
                 if event.type() == QEvent.DragEnter:
                     self.dragEnterEvent(event)

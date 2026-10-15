@@ -267,6 +267,9 @@ class _BottomWindow(QWidget):
         self.dismissed = False
         self._confirming_close = False
         self.drag_offset = None
+        self._frame_drag_start = None
+        self._frame_drag_origin = None
+        self._frame_dragging = False
         self._lowering = False
         self._lower_pending = False
         self.setAttribute(Qt.WA_ShowWithoutActivating)
@@ -295,6 +298,8 @@ class _BottomWindow(QWidget):
         self.keep_below_windows()
 
     def event(self, event):
+        if event.type() in (QEvent.Hide, QEvent.UngrabMouse):
+            self._finish_frame_drag()
         result = super().event(event)
         if event.type() == QEvent.WindowActivate and not self._lowering and not self._lower_pending:
             self._lower_pending = True
@@ -327,19 +332,80 @@ class _BottomWindow(QWidget):
     def close_warning_text(self):
         return "이 도구를 닫을까요?\n저장된 일정은 유지됩니다. 트레이에서 다시 열 수 있습니다."
 
+    def _frame_edge_at(self, point):
+        # Leave buttons, text selection, lists and scrollbars to their own
+        # widgets, even where a control happens to touch the outer edge.
+        if not self.rect().contains(point) or self.childAt(point) is not None:
+            return False
+        margin = 10
+        return (point.x() < margin or point.y() < margin
+                or point.x() >= self.width() - margin
+                or point.y() >= self.height() - margin)
+
+    def _begin_frame_drag(self, event):
+        self._frame_drag_start = event.globalPos()
+        self._frame_drag_origin = self.pos()
+        self._frame_dragging = False
+        self.drag_offset = event.globalPos() - self.frameGeometry().topLeft()
+
+    def _move_frame_drag(self, event):
+        if self._frame_drag_start is None:
+            return False
+        if not event.buttons() & Qt.LeftButton:
+            self._finish_frame_drag()
+            return True
+        difference = event.globalPos() - self._frame_drag_start
+        if difference.manhattanLength() >= QApplication.startDragDistance():
+            self._frame_dragging = True
+        if self._frame_dragging:
+            self.move(self._frame_drag_origin + difference)
+        return True
+
+    def _finish_frame_drag(self):
+        if self._frame_drag_start is None:
+            return False
+        moved = self._frame_dragging and self.pos() != self._frame_drag_origin
+        self._frame_drag_start = None
+        self._frame_drag_origin = None
+        self._frame_dragging = False
+        self.drag_offset = None
+        application = QApplication.instance()
+        if moved and not (application and application.property("shutting_down")):
+            self._emit_moved()
+            self.keep_below_windows()
+        return True
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._frame_edge_at(event.pos()):
+            self._begin_frame_drag(event)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._move_frame_drag(event):
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._finish_frame_drag():
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
     def eventFilter(self, obj, event):
         if obj is getattr(self, "handle", None):
             if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
-                self.drag_offset = event.globalPos() - self.frameGeometry().topLeft()
+                self._begin_frame_drag(event)
                 return True
-            if event.type() == QEvent.MouseMove and self.drag_offset is not None:
-                self.move(event.globalPos() - self.drag_offset)
+            if event.type() == QEvent.MouseMove and self._move_frame_drag(event):
                 return True
-            if event.type() == QEvent.MouseButtonRelease and self.drag_offset is not None:
-                self.drag_offset = None
-                self._emit_moved()
-                self.keep_below_windows()
+            if (event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton
+                    and self._finish_frame_drag()):
                 return True
+            if event.type() == QEvent.UngrabMouse:
+                self._finish_frame_drag()
         return super().eventFilter(obj, event)
 
     def closeEvent(self, event):
