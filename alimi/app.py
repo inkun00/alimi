@@ -2356,37 +2356,55 @@ def smoke_test(app, window, store, report_path: Path):
             calendar_source = window.args.smoke_calendar.name
             calendar_text = extract_file_text(window.args.smoke_calendar, window.ocr.recognize)
             calendar_plan = parse_schedule_text(calendar_text, source=calendar_source)
-            report["checks"]["calendar_image_extracts_31_real_schedules"] = len(calendar_plan) == 31
-            report["checks"]["calendar_image_preserves_document_year_and_months"] = (
-                all(event.start_date.startswith("2021-") and event.date_precision == "day" for event in calendar_plan) and
-                [sum(event.start_date.startswith(f"2021-{month:02d}-") for event in calendar_plan)
-                 for month in range(3, 9)] == [9, 7, 5, 3, 4, 3])
-            report["checks"]["calendar_image_keeps_cross_month_vacation_as_one_range"] = sum(
-                event.start_date == "2021-07-21" and event.end_date == "2021-08-18" for event in calendar_plan) == 1
-            report["checks"]["calendar_image_keeps_distinct_events_in_same_period"] = sum(
-                event.start_date == "2021-04-19" and event.end_date == "2021-04-23" for event in calendar_plan) == 2
-            report["checks"]["calendar_image_omits_calendar_grid_and_school_day_totals"] = not any(
-                "수업일수" in event.title or event.date_precision == "month" for event in calendar_plan)
+            calendar_reference = (json.loads(window.args.smoke_calendar_reference.read_text(encoding="utf-8"))
+                                  if window.args.smoke_calendar_reference else None)
+            calendar_count = calendar_reference["event_count"] if calendar_reference else 31
+            report["checks"]["calendar_image_extracts_expected_schedules"] = len(calendar_plan) == calendar_count
+            if calendar_reference:
+                report["checks"]["calendar_image_all_dates_and_ranges_match_reference"] = (
+                    sorted((event.start_date, event.end_date or "") for event in calendar_plan) ==
+                    sorted((event["start"], event.get("end") or "") for event in calendar_reference["events"]))
+                report["checks"]["calendar_image_preserves_academic_year_month_counts"] = {
+                    month: sum(event.start_date.startswith(month + "-") for event in calendar_plan)
+                    for month in calendar_reference["month_counts"]} == calendar_reference["month_counts"]
+                report["checks"]["calendar_image_preserves_year_crossing_periods"] = sum(
+                    event.start_date == "2022-12-22" and event.end_date in ("2023-01-11", "2023-02-28")
+                    for event in calendar_plan) == 2
+                report["checks"]["calendar_image_omits_publication_date_and_preserves_dated_milestones"] = (
+                    not any(event.start_date.startswith("2021-") or event.date_precision == "month"
+                            for event in calendar_plan) and
+                    any(event.start_date == "2022-04-07" and "수업일수" in event.title for event in calendar_plan))
+            else:
+                report["checks"]["calendar_image_preserves_document_year_and_months"] = (
+                    all(event.start_date.startswith("2021-") and event.date_precision == "day" for event in calendar_plan) and
+                    [sum(event.start_date.startswith(f"2021-{month:02d}-") for event in calendar_plan)
+                     for month in range(3, 9)] == [9, 7, 5, 3, 4, 3])
+                report["checks"]["calendar_image_keeps_cross_month_vacation_as_one_range"] = sum(
+                    event.start_date == "2021-07-21" and event.end_date == "2021-08-18" for event in calendar_plan) == 1
+                report["checks"]["calendar_image_keeps_distinct_events_in_same_period"] = sum(
+                    event.start_date == "2021-04-19" and event.end_date == "2021-04-23" for event in calendar_plan) == 2
+                report["checks"]["calendar_image_omits_calendar_grid_and_school_day_totals"] = not any(
+                    "수업일수" in event.title or event.date_precision == "month" for event in calendar_plan)
             calendar_before = len(store.list_events())
             window.receive_import_text(calendar_text, calendar_source)
             app.processEvents()
             calendar_dialog = window.import_dialog
             report["checks"]["calendar_image_waits_for_review_before_registration"] = (
-                calendar_dialog is not None and calendar_dialog.table.rowCount() == 31 and
+                calendar_dialog is not None and calendar_dialog.table.rowCount() == calendar_count and
                 len(store.list_events()) == calendar_before)
             calendar_dialog.grab().save(str(report_path.with_name(report_path.stem + "-calendar-review.png")))
             calendar_dialog.register_button.click()
             app.processEvents()
             registered_calendar = [event for event in store.list_events() if event.source == calendar_source]
             report["checks"]["calendar_image_registers_exactly_reviewed_schedules"] = (
-                len(registered_calendar) == 31 and len(store.list_events()) == calendar_before + 31)
+                len(registered_calendar) == calendar_count and len(store.list_events()) == calendar_before + calendar_count)
             window.receive_import_text(calendar_text, calendar_source)
             app.processEvents()
             window.import_dialog.register_button.click()
             app.processEvents()
             report["checks"]["calendar_image_reanalysis_does_not_duplicate"] = (
-                len([event for event in store.list_events() if event.source == calendar_source]) == 31 and
-                len(store.list_events()) == calendar_before + 31)
+                len([event for event in store.list_events() if event.source == calendar_source]) == calendar_count and
+                len(store.list_events()) == calendar_before + calendar_count)
         from contextlib import closing
         from dataclasses import asdict
         def persistent_events(repository):
@@ -2485,6 +2503,7 @@ def main():
     parser.add_argument("--smoke-test", type=Path)
     parser.add_argument("--smoke-document", type=Path)
     parser.add_argument("--smoke-calendar", type=Path)
+    parser.add_argument("--smoke-calendar-reference", type=Path)
     args = parser.parse_args()
     frozen_install()
     args.data_dir = args.data_dir or default_data_dir()

@@ -280,6 +280,44 @@ class FileImportUiTests(unittest.TestCase):
         self.assertEqual([], self.store.list_events())
         self.assertIn(text, self.store.get_setting("capture_draft"))
 
+    def test_academic_calendar_handles_english_headers_wrapped_titles_and_next_year(self):
+        text = (
+            "예시대학교 2022학년도 학사일정\n2021.10.08.\n2022년 3월 March\n"
+            "3. 1. 삼일절\n3. 29. 수업일수 4주\n6월 June\n"
+            "6. 22.~7. 12. 하계 계절학기\n6. 22.~8. 31. 하계 현장실습기간\n"
+            "7월 July\n7. 1.~7. 더PLUS다전공, 전과,\n재입학 신청\n12월 December\n"
+            "12. 22.~1. 11. 동계 계절학기\n12. 22.~2. 28. 동계 현장실습기간\n"
+            "2023년 1월 January\n1. 2.~6. 더PLUS다전공, 전과,\n재입학 신청\n"
+            "1. 13.~15. 계절학기 성적공시\n2023년 2월 February\n2. 7.~10. 수강 신청"
+        )
+        image_path = self.data_dir / "annual-calendar.png"
+        image = QImage(80, 80, QImage.Format_RGB32)
+        image.fill(Qt.white)
+        self.assertTrue(image.save(str(image_path)))
+        with patch.object(self.window.ocr, "recognize", return_value=text):
+            self.window.import_file_paths([str(image_path)])
+            self.wait_for_import()
+        dialog = self.preview()
+        self.assertEqual(10, dialog.table.rowCount())
+        self.assertEqual([], self.store.list_events())
+        self.assertEqual(text, dialog.recognized_editor.toPlainText())
+        self.register()
+        events = self.store.list_events()
+        self.assertEqual(10, len(events))
+        spans = {(event.start_date, event.end_date) for event in events}
+        self.assertIn(("2022-06-22", "2022-07-12"), spans)
+        self.assertIn(("2022-12-22", "2023-01-11"), spans)
+        self.assertIn(("2022-12-22", "2023-02-28"), spans)
+        self.assertIn(("2023-01-02", "2023-01-06"), spans)
+        self.assertFalse(any(event.start_date.startswith("2021-") for event in events))
+        self.assertEqual(2, sum("재입학 신청" in event.title for event in events))
+        self.assertEqual(1, sum("수업일수 4주" in event.title for event in events))
+        self.window.import_text()
+        self.assertEqual(10, self.preview().table.rowCount())
+        self.register()
+        self.assertEqual([event.id for event in events], [event.id for event in self.store.list_events()])
+        self.assertEqual([], self.errors)
+
     def test_reanalyzed_document_still_requires_confirmation_and_preserves_done_duplicates(self):
         document = self.document("duplicate-plan.txt", "2099년 9월 10일 국어 평가")
         self.window.import_file_paths([str(document)])

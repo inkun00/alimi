@@ -62,9 +62,14 @@ def _rows_text(fragments):
     return "\n".join("  ".join(item.text for item in row) for row in _text_rows(fragments))
 
 
-_MONTH_HEADING = re.compile(r"(?:(\d{4})\s*(?:년|[.])\s*)?(1[0-2]|[1-9])\s*월[.]?")
+_ENGLISH_MONTH = (r"January|February|March|April|May|June|July|August|September|"
+                  r"October|November|December")
+_MONTH_HEADING = re.compile(r"(?:(\d{4})\s*(?:년|[.])\s*)?(1[0-2]|[1-9])\s*월[.]?"
+                            rf"\s*(?:{_ENGLISH_MONTH})?", re.IGNORECASE)
+_ENGLISH_MONTH_ONLY = re.compile(rf"(?:{_ENGLISH_MONTH})", re.IGNORECASE)
 _SCHOOL_DAY_TOTAL = re.compile(r"수업\s*일수\s*[:：]?\s*\d+\s*일?\s*")
 _CALENDAR_DATE_START = re.compile(r"^[^\w가-힣]*\d{1,2}\s*(?:일(?=\s|$)|[（(]|[./]\s*\d{1,2})")
+_CALENDAR_EXPLICIT_MONTH = re.compile(r"^[^\w가-힣]*(\d{1,2})\s*[./]\s*\d{1,2}")
 
 
 def _grid_numbers(text):
@@ -72,16 +77,22 @@ def _grid_numbers(text):
     return bool(tokens) and all(token.isdecimal() and 1 <= int(token) <= 31 for token in tokens)
 
 
-def _calendar_body(fragments):
+def _calendar_body(fragments, *, drop_totals=True):
     return [item for item in fragments if any(ch.isalnum() for ch in item.text)
             and not _grid_numbers(item.text)
-            and not _SCHOOL_DAY_TOTAL.fullmatch(item.text.strip())]
+            and not (drop_totals and _SCHOOL_DAY_TOTAL.fullmatch(item.text.strip()))]
 
 
 def _calendar_date_rows(fragments):
     """Count observable leading dates, without guessing or rewriting dates."""
     return sum(bool(_CALENDAR_DATE_START.match(" ".join(item.text for item in row)))
                for row in _text_rows(fragments))
+
+
+def _unexpected_calendar_months(fragments, month):
+    months = [_CALENDAR_EXPLICIT_MONTH.match(" ".join(item.text for item in row))
+              for row in _text_rows(fragments)]
+    return sum(int(match.group(1)) != month for match in months if match)
 
 
 @dataclass(frozen=True)
@@ -92,9 +103,10 @@ class _CalendarPanel:
     right: float
     bottom: float
     fragments: tuple[_TextFragment, ...]
+    side_list: bool = False
 
 
-def _calendar_panels(fragments, width, height):
+def _below_calendar_panels(fragments, width, height):
     """Recognize a month-panel calendar only with weekday and numeric grids.
 
     A normal table with month headings must retain its original row order. The
@@ -145,6 +157,102 @@ def _calendar_panels(fragments, width, height):
             body = tuple(_calendar_body([item for item in inside if item.cy > top]))
             panels.append(_CalendarPanel(heading, left, top, right, bottom, body))
     return panels
+
+
+def _weekday_count(text):
+    compact = text.replace(" ", "")
+    return len(compact) if compact and all(ch in "일월화수목금토" for ch in compact) else 0
+
+
+def _month_headings(fragments):
+    """Join an English month label only when it is adjacent on the same row."""
+    headings = []
+    for item in fragments:
+        if not _MONTH_HEADING.fullmatch(item.text.strip()):
+            continue
+        suffix = next((other for other in fragments
+                       if _ENGLISH_MONTH_ONLY.fullmatch(other.text.strip())
+                       and abs(other.cy - item.cy) <= min(other.height, item.height) * 0.5
+                       and -item.height * 0.25 <= other.left - item.right <= item.height), None)
+        if suffix is not None:
+            item = _TextFragment(item.left, min(item.top, suffix.top), suffix.right,
+                                 max(item.bottom, suffix.bottom), item.text + " " + suffix.text)
+        headings.append(item)
+    return headings
+
+
+def _side_calendar_panels(fragments, width, height):
+    """Find calendars whose dated lists sit to the right of each numeric grid.
+
+    Header centers do not divide these panels: a short month header is centered
+    over the narrow calendar, not over the calendar plus its schedule list. The
+    repeated weekday grids supply both the list's left edge and the next
+    panel's boundary, so long descriptions retain their complete width.
+    """
+    heading_rows = _text_rows(_month_headings(fragments))
+    if not heading_rows or any(len(row) < 2 or len(row) != len(heading_rows[0]) for row in heading_rows):
+        return []
+    columns = [[] for _ in heading_rows[0]]
+    for index, headers in enumerate(heading_rows):
+        if len({_MONTH_HEADING.fullmatch(item.text.strip()).group(2) for item in headers}) != len(headers):
+            return []
+        bottom = min(item.top for item in heading_rows[index + 1]) if index + 1 < len(heading_rows) else height
+        grids = []
+        for column, heading in enumerate(headers):
+            low = heading.left - heading.height
+            high = headers[column + 1].left - heading.height if column + 1 < len(headers) else width
+            candidates = [item for item in fragments if low <= (item.left + item.right) / 2 < high
+                          and heading.cy < item.cy < min(bottom, heading.bottom + heading.height * 2)
+                          and _weekday_count(item.text)]
+            weekdays = next((row for row in _text_rows(candidates)
+                             if sum(_weekday_count(item.text) for item in row) >= 5), None)
+            if weekdays is None:
+                return []
+            grid_left = min(item.left for item in weekdays)
+            grid_right = max(item.right for item in weekdays)
+            grid_cy = statistics.median(item.cy for item in weekdays)
+            tolerance = statistics.median(item.height for item in weekdays) * 0.35
+            numbers = [item for item in fragments if grid_left - tolerance <= (item.left + item.right) / 2 <= grid_right + tolerance
+                       and grid_cy + tolerance < item.cy < bottom and _grid_numbers(item.text)]
+            number_rows = _text_rows(numbers)
+            if len(number_rows) < 3 or sum(len(item.text.split()) for item in numbers) < 14:
+                return []
+            grids.append((heading, grid_left, grid_right, tolerance, max(item.cy for item in numbers)))
+        for column, (heading, grid_left, grid_right, tolerance, grid_bottom) in enumerate(grids):
+            right = grids[column + 1][1] if column + 1 < len(grids) else width
+            body = tuple(_calendar_body([item for item in fragments
+                                        if grid_right + tolerance * 0.1 < (item.left + item.right) / 2 < right
+                                        and heading.cy < item.cy < bottom], drop_totals=False))
+            # A dated row beside the numeric grid distinguishes this layout
+            # from the existing calendar-with-list-below layout.
+            if not body or not any(_CALENDAR_DATE_START.match(item.text.strip())
+                                   and item.cy < grid_bottom
+                                   for item in body):
+                return []
+            top = min(item.top for item in body) - tolerance * 0.25
+            columns[column].append(_CalendarPanel(heading, max(0, grid_right - tolerance), max(0, top),
+                                                  right, bottom, body, True))
+    # A side-list document is usually laid out as two vertical semesters.
+    # Keeping each column intact also preserves explicit January year labels.
+    return [panel for column in columns for panel in column]
+
+
+def _calendar_panels(fragments, width, height):
+    return (_below_calendar_panels(fragments, width, height)
+            or _side_calendar_panels(fragments, width, height))
+
+
+def _calendar_rows_text(fragments, *, join_continuations=False):
+    rows = ["  ".join(item.text for item in row) for row in _text_rows(fragments)]
+    if not join_continuations:
+        return "\n".join(rows)
+    lines = []
+    for row in rows:
+        if lines and not _CALENDAR_DATE_START.match(row):
+            lines[-1] += " " + row
+        else:
+            lines.append(row)
+    return "\n".join(lines)
 
 
 class OcrEngine:
@@ -323,15 +431,21 @@ class OcrEngine:
                 if min(crop.shape[:2]) >= 4:
                     try:
                         refined = _calendar_body(self._read_fragments(cv2.resize(crop, None, fx=2, fy=2,
-                                                                                interpolation=cv2.INTER_CUBIC)))
+                                                                                interpolation=cv2.INTER_CUBIC)),
+                                                 drop_totals=not panel.side_list)
+                        if panel.side_list:
+                            refined = [item for item in refined if not _weekday_count(item.text)]
+                        month = int(_MONTH_HEADING.fullmatch(panel.heading.text.strip()).group(2))
                         if (len(_text_rows(refined)) >= len(_text_rows(body))
-                                and _calendar_date_rows(refined) >= _calendar_date_rows(body)):
+                                and _calendar_date_rows(refined) >= _calendar_date_rows(body)
+                                and (not panel.side_list or _unexpected_calendar_months(refined, month)
+                                     <= _unexpected_calendar_months(body, month))):
                             body = refined
                     except Exception:
                         # Refinement is optional: the successfully recognized
                         # original list must survive a failed second OCR pass.
                         pass
-            output.extend((panel.heading.text, _rows_text(body)))
+            output.extend((panel.heading.text, _calendar_rows_text(body, join_continuations=panel.side_list)))
         return "\n".join(text for text in output if text)
 
     def recognize(self, image) -> str:

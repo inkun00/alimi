@@ -965,6 +965,187 @@ class CalendarSectionParserTests(unittest.TestCase):
                          [(event.start_date, event.status) for event in events])
 
 
+class AnnualAcademicCalendarParserTests(unittest.TestCase):
+    def test_university_calendar_preserves_all_55_entries_and_24_ranges(self):
+        text = """동명대학교 2022학년도 학사일정
+2021.10.08.
+2022년 3월 March
+3. 1. 삼일절
+3. 2. 개강일
+3. 9. 대통령선거
+3. 29. 수업일수 4주
+3. 31. 수업일수 30일
+4월 April
+4. 7. 수업일수 1/3
+4. 11. 개교기념일
+4. 20~26. 중간시험
+4. 25. 수업일수 1/2
+5월 May
+5. 2. 수업일수 60일
+5. 5. 어린이날
+5. 17. 수업일수 11주
+5. 30. 수업일수 90일
+6월 June
+6. 1. 전국동시 지방선거
+6. 6. 현충일
+6. 8.~14. 보강주간
+6. 15.~21. 기말시험
+6. 22. 하계방학시작일
+6. 22.~7. 12. 하계 계절학기
+6. 22.~8. 31. 하계 현장실습기간
+6. 28.~7. 1. 성적공시 및 정정
+7월 July
+7. 1.~7. 더PLUS+다전공, 전과,
+재입학 신청
+7. 1.~8. 31. 복학 신청
+7. 15.~17. 계절학기 성적공시
+7. 26.~29. 수강 신청
+8월 August
+8. 15. 광복절
+8. 17. 8월 학위수여식
+8. 22.~24. 등록기간
+8. 31. 복학, 미등록휴학 마감
+9월 September
+9. 1. 개강일
+9. 9.~12. 추석 연휴
+9. 28. 수업일수 4주
+9. 30. 수업일수 30일
+10월 October
+10. 3. 개천절
+10. 11. 수업일수 1/3
+10. 10. 한글날 대체공휴일
+10. 20.~26. 중간시험
+10. 26. 수업일수 1/2
+10. 31. 수업일수 60일
+11월 November
+11. 16. 수업일수 11주
+11. 29. 수업일수 90일
+12월 December
+12. 8.~14. 보강주간
+12. 15.~21. 기말시험
+12. 22. 동계방학시작일
+12. 22.~1. 11. 동계 계절학기
+12. 22.~2. 28. 동계 현장실습기간
+12. 27.~30. 성적공시 및 정정
+2023년 1월 January
+1. 2.~6. 더PLUS+다전공, 전과,
+재입학 신청
+1. 2.~2. 28. 복학 신청
+1. 13.~15. 계절학기 성적공시
+1. 21.~24. 설날 연휴
+2023년 2월 February
+2. 7.~10. 수강 신청
+2. 15. 2월 학위수여식
+2. 20.~22. 등록기간
+2. 28. 복학, 미등록휴학 마감"""
+        events = parse_schedule_text(text, reference_date="2026-10-15")
+        self.assertEqual(55, len(events))
+        expected_counts = {"2022-03": 5, "2022-04": 4, "2022-05": 4, "2022-06": 8,
+                           "2022-07": 4, "2022-08": 4, "2022-09": 4, "2022-10": 6,
+                           "2022-11": 2, "2022-12": 6, "2023-01": 4, "2023-02": 4}
+        self.assertEqual(expected_counts, {month: sum(event.start_date.startswith(month) for event in events)
+                                           for month in expected_counts})
+        expected_ranges = [
+            ("2022-04-20", "2022-04-26"), ("2022-06-08", "2022-06-14"),
+            ("2022-06-15", "2022-06-21"), ("2022-06-22", "2022-07-12"),
+            ("2022-06-22", "2022-08-31"), ("2022-06-28", "2022-07-01"),
+            ("2022-07-01", "2022-07-07"), ("2022-07-01", "2022-08-31"),
+            ("2022-07-15", "2022-07-17"), ("2022-07-26", "2022-07-29"),
+            ("2022-08-22", "2022-08-24"), ("2022-09-09", "2022-09-12"),
+            ("2022-10-20", "2022-10-26"), ("2022-12-08", "2022-12-14"),
+            ("2022-12-15", "2022-12-21"), ("2022-12-22", "2023-01-11"),
+            ("2022-12-22", "2023-02-28"), ("2022-12-27", "2022-12-30"),
+            ("2023-01-02", "2023-01-06"), ("2023-01-02", "2023-02-28"),
+            ("2023-01-13", "2023-01-15"), ("2023-01-21", "2023-01-24"),
+            ("2023-02-07", "2023-02-10"), ("2023-02-20", "2023-02-22")]
+        self.assertEqual(expected_ranges, [(event.start_date, event.end_date) for event in events if event.end_date])
+        self.assertTrue(all(event.status == "open" and event.date_precision == "day" for event in events))
+        self.assertEqual(2, sum("재입학 신청" in event.title for event in events))
+        self.assertEqual(2, sum("1/3" in event.title for event in events))
+        self.assertEqual(2, sum("1/2" in event.title for event in events))
+
+    def test_academic_month_year_is_independent_of_side_by_side_reading_order(self):
+        text = """2022학년도 학사일정
+2022년3월March
+3. 1. 삼일절
+9월 September
+9. 1. 개강일
+7월 July
+7. 26.~29. 수강 신청
+2023년 1월 January
+1. 21.~24. 설날 연휴
+8월 August
+8. 15. 광복절
+2023년2월 February
+2. 15. 2월 학위수여식"""
+        self.assertEqual(["2022-03-01", "2022-09-01", "2022-07-26", "2023-01-21",
+                          "2022-08-15", "2023-02-15"],
+                         [event.start_date for event in parse_schedule_text(text)])
+
+    def test_academic_january_and_february_roll_over_without_explicit_year_headers(self):
+        events = parse_schedule_text("2022학년도\n12월 December\n12.22.~2.28. 동계실습\n1월 January\n1.2. 개강\n2월 February\n2.15. 졸업식")
+        self.assertEqual([("2022-12-22", "2023-02-28"), ("2023-01-02", None), ("2023-02-15", None)],
+                         [(event.start_date, event.end_date) for event in events])
+
+    def test_explicit_section_and_event_years_take_priority_over_academic_year(self):
+        events = parse_schedule_text("2022학년도\n2024년1월 January\n1.2. 설명회\n2025년 1월 3일 특별행사\n8월 August\n8.15. 광복절")
+        self.assertEqual(["2024-01-02", "2025-01-03", "2022-08-15"], [event.start_date for event in events])
+
+    def test_publication_stamp_is_excluded_only_before_a_proved_calendar(self):
+        events = parse_schedule_text("2022학년도 학사일정\n2021.10.08.\n2022년3월March\n3.1. 삼일절")
+        self.assertEqual(["2022-03-01"], [event.start_date for event in events])
+        actual = parse_schedule_text("2021.10.08. 설명회\n2022년3월March\n3.1. 삼일절")
+        self.assertEqual(["2021-10-08", "2022-03-01"], [event.start_date for event in actual])
+
+    def test_real_heading_and_date_before_calendar_are_not_discarded_as_a_publication_stamp(self):
+        events = parse_schedule_text("2022학년도\n졸업식\n2022.02.18\n2022년3월 March\n3.1. 삼일절")
+        self.assertEqual([("2022-02-18", "졸업식"), ("2022-03-01", "3.1. 삼일절")],
+                         [(event.start_date, event.title) for event in events])
+
+    def test_fractional_milestones_do_not_supply_extra_dates_or_lose_the_fraction(self):
+        events = parse_schedule_text("2022년4월April\n4.7. 수업일수 1/3\n4.25. 수업일수 1/2\n수업일수: 22일")
+        self.assertEqual([("2022-04-07", "4.7. 수업일수 1/3"), ("2022-04-25", "4.25. 수업일수 1/2")],
+                         [(event.start_date, event.title) for event in events])
+
+    def test_wrapped_title_becomes_one_event_and_source_keeps_original_line_break(self):
+        events = parse_schedule_text("2022년7월July\n7.1.~7. 더PLUS+다전공, 전과,\n재입학 신청\n7.1.~8.31. 복학 신청")
+        self.assertEqual(2, len(events))
+        self.assertEqual("7.1.~7. 더PLUS+다전공, 전과, 재입학 신청", events[0].title)
+        self.assertEqual("2022년 7월\n7.1.~7. 더PLUS+다전공, 전과,\n재입학 신청", events[0].source_text)
+        self.assertEqual(("2022-07-01", "2022-07-07"), (events[0].start_date, events[0].end_date))
+
+    def test_calendar_minus_and_ocr_punctuation_support_short_range_ends(self):
+        for expression in ("12.15,~21.", "12.15.−21.", "12.15.–21."):
+            with self.subTest(expression=expression):
+                event = parse_schedule_text("2022년12월December\n" + expression + " 기말시험")[0]
+                self.assertEqual(("2022-12-15", "2022-12-21", "open"),
+                                 (event.start_date, event.end_date, event.status))
+
+    def test_ocr_comma_can_separate_a_range_end_month_without_creating_a_grade_date(self):
+        events = parse_schedule_text("2022학년도\n12월 December\n12.22,~1,11. 동계 계절학기\n3, 5학년 참여 안내")
+        self.assertEqual(1, len(events))
+        self.assertEqual(("2022-12-22", "2023-01-11", "open"),
+                         (events[0].start_date, events[0].end_date, events[0].status))
+        self.assertIn("1,11.", events[0].source_text)
+
+    def test_long_wrapped_calendar_title_does_not_fail_when_joined(self):
+        wrapped = "재입학 신청 방법과 제출 자료를 확인하세요. " * 4
+        events = parse_schedule_text("2022년7월July\n7.1.~7. 더PLUS+다전공, 전과,\n" + wrapped)
+        self.assertEqual(1, len(events))
+        self.assertIn(wrapped.strip(), events[0].title)
+        self.assertEqual("2022-07-07", events[0].end_date)
+
+    def test_unreadable_calendar_end_is_kept_for_review_without_guessing(self):
+        event = parse_schedule_text("2022년12월December\n12.22.~1S. 동계실습")[0]
+        self.assertEqual(("2022-12-22", None, "review"), (event.start_date, event.end_date, event.status))
+        self.assertIn("종료 날짜를 명확히", event.notes)
+        self.assertIn("1S.", event.title)
+
+    def test_english_month_headers_still_need_real_dated_entries(self):
+        event = parse_schedule_text("2022년9월September\n관련 일정 안내")[0]
+        self.assertEqual(("2022-09-01", "month"), (event.start_date, event.date_precision))
+
+
 class ParserTests(unittest.TestCase):
     def test_month_precision_formats_only_the_supplied_month(self):
         event = parse_schedule_text("9월 과학 평가", reference_date="2026-01-01")[0]

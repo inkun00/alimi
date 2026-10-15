@@ -38,6 +38,28 @@ def panel_text(fragments, width=640, height=680):
         return engine._calendar_text(np.zeros((height, width, 3), dtype=np.uint8), fragments)
 
 
+def side_calendar_fixture():
+    result = [fragment("2022학년도 학사일정", 100, 0, 210)]
+    for column, months in enumerate(((3, 4), (9, 10))):
+        for row, month in enumerate(months):
+            x, y = 30 + column * 380, 35 + row * 220
+            heading = f"2022년{month}월March" if month == 3 else f"{month}월"
+            result.append(fragment(heading, x, y, 115 if month == 3 else 35))
+            if month != 3:
+                result.append(fragment({4: "April", 9: "September", 10: "October"}[month], x + 40, y, 70))
+            for cell, weekday in enumerate("일월화수목금토"):
+                result.append(fragment(weekday, x + cell * 20, y + 24, 14))
+            for day in range(1, 32):
+                result.append(fragment(str(day), x + ((day - 1) % 7) * 20,
+                                       y + 44 + ((day - 1) // 7) * 18, 14))
+            result.extend((fragment(f"{month}. 1.", x + 145, y + 45, 50),
+                           fragment(f"{month}월 첫 행사 끝부분", x + 205, y + 45, 160),
+                           fragment("재입학 신청", x + 205, y + 65, 100),
+                           fragment(f"{month}. 3.", x + 145, y + 90, 50),
+                           fragment("수업일수30일", x + 205, y + 90, 130)))
+    return result
+
+
 class CalendarOcrLayoutTests(unittest.TestCase):
     def test_month_columns_are_read_down_each_panel(self):
         text = panel_text(calendar_fixture())
@@ -166,6 +188,83 @@ class CalendarOcrLayoutTests(unittest.TestCase):
         before = list(values)
         panel_text(values)
         self.assertEqual(values, before)
+
+    def test_side_lists_are_read_down_each_semester_without_numeric_grids(self):
+        text = panel_text(side_calendar_fixture(), 820, 500)
+        self.assertEqual(text.count("첫 행사"), 4)
+        self.assertLess(text.index("4월 첫 행사"), text.index("9월 첫 행사"))
+        self.assertNotIn("일  월  화", text)
+        self.assertFalse(any(line.isdecimal() for line in text.splitlines()))
+
+    def test_side_list_bounds_follow_grids_not_month_header_centers(self):
+        panels = _calendar_panels(side_calendar_fixture(), 820, 500)
+        self.assertEqual(len(panels), 4)
+        self.assertTrue(all(panel.side_list for panel in panels))
+        self.assertEqual(panels[0].right, 410)
+        text = panel_text(side_calendar_fixture(), 820, 500)
+        self.assertIn("3월 첫 행사 끝부분 재입학 신청", text)
+        self.assertIn("9월 첫 행사 끝부분 재입학 신청", text)
+
+    def test_side_list_first_row_can_overlap_the_month_heading_height(self):
+        values = side_calendar_fixture()
+        shifted = []
+        for item in values:
+            if item.top == 80 and item.left >= 175 and item.left < 410:
+                item = _TextFragment(item.left, 37, item.right, 51, item.text)
+            shifted.append(item)
+        panels = _calendar_panels(shifted, 820, 500)
+        self.assertLessEqual(panels[0].top, 37)
+        self.assertIn("3. 1.  3월 첫 행사 끝부분", panel_text(shifted, 820, 500))
+
+    def test_side_list_english_month_fragments_are_headers(self):
+        text = panel_text(side_calendar_fixture(), 820, 500)
+        self.assertIn("2022년3월March\n", text)
+        self.assertIn("4월 April\n", text)
+        self.assertIn("9월 September\n", text)
+        self.assertIn("10월 October\n", text)
+
+    def test_dated_teaching_day_milestones_in_side_lists_are_preserved(self):
+        text = panel_text(side_calendar_fixture(), 820, 500)
+        self.assertEqual(text.count("수업일수30일"), 4)
+        self.assertIn("3. 3.  수업일수30일", text)
+
+    def test_side_list_detection_is_coordinate_and_scale_independent(self):
+        values = side_calendar_fixture()
+        moved = [_TextFragment(item.left * 1.7 + 13, item.top * 1.7 + 11,
+                               item.right * 1.7 + 13, item.bottom * 1.7 + 11, item.text)
+                 for item in values]
+        self.assertEqual(panel_text(values, 820, 500), panel_text(moved, 1410, 870))
+
+    def test_side_lists_need_grid_evidence_in_every_month(self):
+        values = [item for item in side_calendar_fixture()
+                  if not (item.left >= 410 and item.top > 250 and item.text in "일월화수목금토")]
+        self.assertIsNone(panel_text(values, 820, 500))
+
+    def test_side_list_refinement_keeps_dated_totals_and_wraps(self):
+        engine = OcrEngine()
+        refined = [[fragment(f"{month}. 1.", 0, 0), fragment("개선된 행사", 60, 0, 130),
+                    fragment("재입학 신청", 60, 35, 110), fragment(f"{month}. 3.", 0, 70),
+                    fragment("수업일수30일", 60, 70, 130)] for month in (3, 4, 9, 10)]
+        with patch.object(engine, "_read_fragments", side_effect=refined):
+            text = engine._calendar_text(np.zeros((500, 820, 3), dtype=np.uint8), side_calendar_fixture())
+        self.assertEqual(text.count("개선된 행사 재입학 신청"), 4)
+        self.assertEqual(text.count("수업일수30일"), 4)
+
+    def test_refinement_cannot_replace_valid_side_list_months_with_bad_digits(self):
+        engine = OcrEngine()
+        refined = [fragment("0. 1. 오인된 첫 행사", 0, 0, 180),
+                   fragment("날짜 없는 연속 제목", 0, 35, 180),
+                   fragment("0. 3. 오인된 둘째 행사", 0, 70, 180)]
+        with patch.object(engine, "_read_fragments", return_value=refined):
+            text = engine._calendar_text(np.zeros((500, 820, 3), dtype=np.uint8), side_calendar_fixture())
+        self.assertNotIn("오인된", text)
+        self.assertIn("3. 1.  3월 첫 행사", text)
+        self.assertIn("10. 3.  수업일수30일", text)
+
+    def test_ordinary_english_month_table_without_calendars_is_unchanged(self):
+        values = [fragment("3월 March", 30, 20, 100), fragment("9월 September", 410, 20, 120),
+                  fragment("3. 1. 행사", 180, 60, 140), fragment("9. 1. 개강", 560, 60, 140)]
+        self.assertIsNone(panel_text(values, 820, 200))
 
 
 if __name__ == "__main__":
