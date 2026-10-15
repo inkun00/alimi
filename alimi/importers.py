@@ -7,6 +7,8 @@ All sources are opened read-only; extraction never changes the original file.
 from __future__ import annotations
 
 import datetime as dt
+import csv
+import io
 import re
 import struct
 import warnings
@@ -55,7 +57,9 @@ def extract_file_text(path: str | Path, ocr_func: OCRFunction | None = None) -> 
             )
         if suffix in {".docx", ".xlsx", ".hwpx"}:
             _validate_archive(source)
-        if suffix in {".txt", ".csv", ".tsv", ".md"}:
+        if suffix in {".csv", ".tsv"}:
+            text = _read_delimited_text(source)
+        elif suffix in {".txt", ".md"}:
             text = _read_plain_text(source)
         elif suffix == ".docx":
             text = _read_docx(source)
@@ -141,8 +145,24 @@ def _read_docx(path: Path) -> str:
             lines.append(Paragraph(child, document).text)
         elif kind == "tbl":
             table = Table(child, document)
-            lines.extend("\t".join(cell.text for cell in row.cells) for row in table.rows)
+            lines.extend("\t".join(_table_cell_text(cell.text) for cell in row.cells) for row in table.rows)
     return "\n".join(lines)
+
+
+def _table_cell_text(value: str) -> str:
+    """A wrapped cell is still one field of its original schedule row."""
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _read_delimited_text(path: Path) -> str:
+    text = _read_plain_text(path)
+    delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
+    try:
+        rows = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter, strict=True)
+        return "\n".join("\t".join(_table_cell_text(cell) for cell in row)
+                         for row in rows if any(cell.strip() for cell in row))
+    except csv.Error as exc:
+        raise DocumentImportError("표 파일의 따옴표나 열 구분을 읽지 못했습니다. CSV 또는 TSV로 다시 저장해 주세요.") from exc
 
 
 def _spreadsheet_value(value: object) -> str:
@@ -171,7 +191,7 @@ def _read_xlsx(path: Path) -> str:
                 raise DocumentImportError("스프레드시트의 행이나 열이 너무 많습니다. 필요한 범위만 가져와 주세요.")
             lines.append(f"[{sheet.title}]")
             for row in sheet.iter_rows(values_only=True):
-                values = [_spreadsheet_value(value) for value in row]
+                values = [_table_cell_text(_spreadsheet_value(value)) for value in row]
                 while values and not values[-1]:
                     values.pop()
                 if any(values):
@@ -318,7 +338,7 @@ def _pdf_page_text(page, plain_text: str, seen_headers: set[tuple[str, ...]]) ->
         if len(rows) >= 2 and max(len(row) for row in rows) >= 2:
             tables.append((table, rows))
     if not tables:
-        return plain_text
+        return _pdf_independent_columns(page) or plain_text
 
     def outside_table(obj):
         if obj.get("object_type") != "char":
@@ -343,6 +363,60 @@ def _pdf_page_text(page, plain_text: str, seen_headers: set[tuple[str, ...]]) ->
         if lines:
             blocks.append((table.bbox[1], table.bbox[0], "[표]\n" + "\n".join(lines)))
     return "\n".join(text for _, _, text in sorted(blocks, key=lambda block: block[:2]))
+
+
+def _pdf_independent_columns(page) -> str | None:
+    """Read repeated, separately dated columns without joining their titles.
+
+    Two aligned rows must each contain a full date and prose in both columns.
+    A single two-date span, or a start/end-date table, is insufficient evidence
+    and keeps the original extraction order.
+    """
+    words = page.extract_words()
+    date_token = re.compile(r"(?:19|20)\d{2}[-./]\d{1,2}[-./]\d{1,2}[.)]?")
+    rows: list[list[dict]] = []
+    for word in sorted(words, key=lambda value: (value["top"], value["x0"])):
+        if rows and abs(rows[-1][0]["top"] - word["top"]) <= 3:
+            rows[-1].append(word)
+        else:
+            rows.append([word])
+    evidence = []
+    for row in rows:
+        row.sort(key=lambda word: word["x0"])
+        anchors = [index for index, word in enumerate(row) if date_token.fullmatch(word["text"])]
+        if len(anchors) != 2:
+            continue
+        first, second = anchors
+        if row[second]["x0"] - row[first]["x0"] < page.width * 0.25:
+            continue
+        if not (any(re.search(r"[가-힣A-Za-z]", word["text"]) for word in row[first + 1:second])
+                and any(re.search(r"[가-힣A-Za-z]", word["text"]) for word in row[second + 1:])):
+            continue
+        evidence.append((row, row[first]["x0"], row[second]["x0"]))
+    if len(evidence) < 2:
+        return None
+    left = evidence[0][1]
+    right = evidence[0][2]
+    aligned = [row for row, x1, x2 in evidence if abs(x1 - left) <= 8 and abs(x2 - right) <= 8]
+    if len(aligned) < 2:
+        return None
+    top = min(word["top"] for row in aligned for word in row) - 1
+    bottom = max(word["bottom"] for row in aligned for word in row) + 1
+    split = right - 2
+    # Do not cut a long left-hand description through the middle of a glyph.
+    if any(word["x0"] < split < word["x1"]
+           for word in words if top <= word["top"] <= bottom):
+        return None
+    blocks = []
+    for bbox in ((0, 0, page.width, max(0, top)),
+                 (0, top, split, bottom),
+                 (split, top, page.width, bottom),
+                 (0, bottom, page.width, page.height)):
+        if bbox[3] > bbox[1]:
+            text = page.crop(bbox).extract_text() or ""
+            if text.strip():
+                blocks.append(text)
+    return "\n".join(blocks)
 
 
 def _local_name(tag: str) -> str:
@@ -370,7 +444,8 @@ def _hwpx_blocks(node: ET.Element) -> list[str]:
         for row in node:
             if _local_name(row.tag) != "tr":
                 continue
-            cells = ["\n".join(_hwpx_blocks(cell)) for cell in row if _local_name(cell.tag) == "tc"]
+            cells = [_table_cell_text("\n".join(_hwpx_blocks(cell)))
+                     for cell in row if _local_name(cell.tag) == "tc"]
             rows.append("\t".join(cells))
         return rows
     if kind == "p":

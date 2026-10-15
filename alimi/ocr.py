@@ -10,6 +10,8 @@ The preprocessing / CTC model contract is based on PaddleOCR and RapidOCR
 from __future__ import annotations
 
 import hashlib
+from calendar import monthrange
+from datetime import date
 import importlib.util
 import math
 from pathlib import Path
@@ -255,6 +257,164 @@ def _calendar_rows_text(fragments, *, join_continuations=False):
     return "\n".join(lines)
 
 
+_CELL_MONTH_TITLE = re.compile(
+    r"(?:(?P<year>19\d{2}|20\d{2})\s*년\s*)?(?P<month>1[0-2]|0?[1-9])\s*월"
+    r"\s*(?:주간\s*일정|주간\s*계획|월간\s*일정|월간\s*계획)")
+_CELL_DAY = re.compile(r"(\d{1,2})\s*일?")
+
+
+def _cell_body_text(items):
+    """Keep multiple lines in one proved day cell, including its clock line."""
+    return " ".join(" ".join(item.text for item in row) for row in _text_rows(items))
+
+
+def _weekly_cell_text(fragments, width, height):
+    """Read explicit consecutive day columns only below a weekly/monthly title.
+
+    A row of numbers alone is not evidence of schedule dates. The month title,
+    explicit ``N일`` headers and repeated, evenly spaced columns must agree.
+    """
+    titles = [(item, match) for item in fragments
+              if (match := _CELL_MONTH_TITLE.fullmatch(item.text.strip()))]
+    if len(titles) != 1:
+        return None
+    title, month = titles[0]
+    candidates = [item for item in fragments if item.top > title.bottom
+                  and re.fullmatch(r"\d{1,2}\s*일", item.text.strip())]
+    rows = _text_rows(candidates)
+    if len(rows) != 1 or not 3 <= len(rows[0]) <= 7:
+        return None
+    headers = rows[0]
+    days = [int(_CELL_DAY.fullmatch(item.text.strip()).group(1)) for item in headers]
+    if days != list(range(days[0], days[0] + len(days))) or not 1 <= days[0] <= days[-1] <= 31:
+        return None
+    if month["year"] and days[-1] > monthrange(int(month["year"]), int(month["month"]))[1]:
+        return None
+    centers = [(item.left + item.right) / 2 for item in headers]
+    gaps = [b - a for a, b in zip(centers, centers[1:])]
+    pitch = statistics.median(gaps)
+    if min(gaps) <= max(item.height for item in headers) * 2 or max(gaps) > min(gaps) * 1.25:
+        return None
+    edges = [max(0, centers[0] - pitch / 2)]
+    edges.extend((a + b) / 2 for a, b in zip(centers, centers[1:]))
+    edges.append(min(width, centers[-1] + pitch / 2))
+    body = [item for item in fragments if item.top >= max(header.bottom for header in headers)]
+    lines = []
+    assigned = set()
+    for column, day in enumerate(days):
+        inside = [item for item in body if edges[column] <= (item.left + item.right) / 2 < edges[column + 1]]
+        if any(item.left < edges[column] - pitch * .1 or item.right > edges[column + 1] + pitch * .1
+               for item in inside):
+            return None
+        text = _cell_body_text(inside)
+        assigned.update(inside)
+        if re.search(r"[가-힣A-Za-z]", text):
+            lines.append(f"{day}일 {text}")
+    if any(item not in assigned and re.search(r"[가-힣A-Za-z]", item.text) for item in body):
+        return None
+    preamble = _rows_text([item for item in fragments if item.cy < title.cy])
+    heading = (month["year"] + "년 " if month["year"] else "") + month["month"] + "월"
+    return "\n".join(part for part in (preamble, heading if lines else "", "\n".join(lines)) if part)
+
+
+def _monthly_cell_text(fragments, width, height):
+    """Assign text to calendar cells only with seven weekdays and a full grid.
+
+    Missing, duplicated or next-month day numbers make the geometry ambiguous;
+    those documents retain the existing reading path instead of guessed dates.
+    """
+    heading_rows = _text_rows(_month_headings(fragments))
+    if not heading_rows:
+        return None
+    panels = []
+    for index, headers in enumerate(heading_rows):
+        centers = [(item.left + item.right) / 2 for item in headers]
+        divisions = [0] + [(a + b) / 2 for a, b in zip(centers, centers[1:])] + [width]
+        bottom = min(item.top for item in heading_rows[index + 1]) if index + 1 < len(heading_rows) else height
+        for column, heading in enumerate(headers):
+            below = [item for item in fragments if heading.bottom <= item.cy < bottom
+                     and divisions[column] <= (item.left + item.right) / 2 < divisions[column + 1]]
+            weekday_rows = _text_rows([item for item in below if _weekday_count(item.text)
+                                      and item.cy < heading.bottom + heading.height * 4])
+            weekday = next((row for row in weekday_rows
+                            if "".join(item.text.replace(" ", "") for item in row)
+                            in ("일월화수목금토", "월화수목금토일")), None)
+            if weekday is None:
+                return None
+            anchors = []
+            for item in weekday:
+                count = _weekday_count(item.text)
+                anchors.extend(item.left + (item.right - item.left) * (n + .5) / count for n in range(count))
+            gaps = [b - a for a, b in zip(anchors, anchors[1:])]
+            pitch = statistics.median(gaps)
+            if len(anchors) != 7 or min(gaps) <= 0 or max(gaps) > min(gaps) * 1.5:
+                return None
+            edges = [anchors[0] - pitch / 2] + [(a + b) / 2 for a, b in zip(anchors, anchors[1:])] + [anchors[-1] + pitch / 2]
+            numbers = [item for item in below if item.cy > max(value.cy for value in weekday)
+                       and edges[0] <= (item.left + item.right) / 2 < edges[-1]
+                       and _CELL_DAY.fullmatch(item.text.strip())]
+            number_rows = _text_rows(numbers)
+            ordered = [item for row in number_rows for item in row]
+            days = [int(_CELL_DAY.fullmatch(item.text.strip()).group(1)) for item in ordered]
+            if len(number_rows) < 4 or days not in (list(range(1, n + 1)) for n in (28, 29, 30, 31)):
+                return None
+            month = _MONTH_HEADING.fullmatch(heading.text.strip())
+            if month.group(1) and len(days) != monthrange(int(month.group(1)), int(month.group(2)))[1]:
+                return None
+            positions = [(row_index, min(range(7), key=lambda n: abs(
+                          anchors[n] - (item.left + item.right) / 2)))
+                         for row_index, row in enumerate(number_rows) for item in row]
+            first_column = positions[0][1]
+            if any(row != (first_column + day - 1) // 7 or cell != (first_column + day - 1) % 7
+                   for day, (row, cell) in zip(days, positions)):
+                return None
+            if month.group(1):
+                weekday_text = "".join(item.text.replace(" ", "") for item in weekday)
+                week_start = 6 if weekday_text.startswith("일") else 0
+                if first_column != (date(int(month.group(1)), int(month.group(2)), 1).weekday() - week_start) % 7:
+                    return None
+            row_centers = [statistics.median(item.cy for item in row) for row in number_rows]
+            row_pitch = statistics.median(b - a for a, b in zip(row_centers, row_centers[1:]))
+            if row_pitch <= max(item.height for item in numbers) * 1.5:
+                return None
+            cell_lines = []
+            assigned = set()
+            for row_index, row in enumerate(number_rows):
+                row_top = min(item.bottom for item in row)
+                row_bottom = min(item.top for item in number_rows[row_index + 1]) if row_index + 1 < len(number_rows) else min(bottom, row_centers[-1] + row_pitch)
+                for number in row:
+                    cx = (number.left + number.right) / 2
+                    cell = min(range(7), key=lambda n: abs(anchors[n] - cx))
+                    # Weekdays are centered; day numbers are commonly aligned
+                    # near the cell's left edge. Keep the nearest column only
+                    # while its center remains clearly inside that column.
+                    if abs(anchors[cell] - cx) > pitch * .45:
+                        return None
+                    inside = [item for item in below if item not in numbers and item not in weekday
+                              and row_top <= item.cy < row_bottom
+                              and edges[cell] <= (item.left + item.right) / 2 < edges[cell + 1]]
+                    if any(item.left < edges[cell] - pitch * .1 or item.right > edges[cell + 1] + pitch * .1
+                           for item in inside):
+                        return None
+                    text = _cell_body_text(inside)
+                    assigned.update(inside)
+                    if re.search(r"[가-힣A-Za-z]", text):
+                        cell_lines.append(f"{number.text.strip().rstrip('일').strip()}일 {text}")
+            # A list outside the date cells belongs to the existing below/side
+            # layout reader; never silently discard it for this new path.
+            if any(item not in assigned and item not in weekday and item not in numbers
+                   and re.search(r"[가-힣A-Za-z]", item.text)
+                   and not _SCHOOL_DAY_TOTAL.fullmatch(item.text.strip()) for item in below):
+                return None
+            panels.append((heading.text, cell_lines))
+    if not any(lines for _, lines in panels):
+        return ""
+    first_top = min(item.top for row in heading_rows for item in row)
+    preamble = _rows_text([item for item in fragments if item.cy < first_top])
+    return "\n".join(part for part in [preamble] + [heading + "\n" + "\n".join(lines)
+                                                   for heading, lines in panels if lines] if part)
+
+
 class OcrEngine:
     def __init__(self, resources_path=None):
         roots = []
@@ -415,6 +575,11 @@ class OcrEngine:
     def _calendar_text(self, pixels, fragments):
         import cv2
         height, width = pixels.shape[:2]
+        cell_text = _weekly_cell_text(fragments, width, height)
+        if cell_text is None:
+            cell_text = _monthly_cell_text(fragments, width, height)
+        if cell_text is not None:
+            return cell_text
         panels = _calendar_panels(fragments, width, height)
         if not panels:
             return None
