@@ -351,6 +351,67 @@ class Store:
         with self._lock, self._db:
             self._db.execute("UPDATE events SET x=?, y=? WHERE id=?", (int(x), int(y), event_id))
 
+    def schedule_reset_ids(self, start: str | None = None, end: str | None = None) -> list[int]:
+        """Snapshot the schedules to reset, including completed/review records.
+
+        With no bounds every schedule is selected. A bounded reset includes
+        schedules whose dates overlap the inclusive period; month-only dates
+        cover their entire month. Undated review records belong only to a full
+        reset. Returning ids lets confirmation keep later imports untouched.
+        """
+        if start is None and end is None:
+            with self._lock:
+                return [row[0] for row in self._db.execute("SELECT id FROM events ORDER BY id")]
+        try:
+            if not isinstance(start, str) or not isinstance(end, str):
+                raise ValueError
+            first, last = date.fromisoformat(start), date.fromisoformat(end)
+            if first.isoformat() != start or last.isoformat() != end:
+                raise ValueError
+        except ValueError:
+            raise ValueError("초기화할 시작일과 종료일을 YYYY-MM-DD 형식으로 지정해 주세요.") from None
+        if first > last:
+            raise ValueError("초기화할 종료일이 시작일보다 빠릅니다.")
+        with self._lock:
+            selected = []
+            for row in self._db.execute(
+                "SELECT id,start_date,end_date,date_precision FROM events WHERE start_date<>'' ORDER BY id"
+            ):
+                event_start = date.fromisoformat(row["start_date"])
+                if row["date_precision"] == "month":
+                    event_start = event_start.replace(day=1)
+                    event_end = event_start.replace(day=monthrange(event_start.year, event_start.month)[1])
+                else:
+                    event_end = date.fromisoformat(row["end_date"] or row["start_date"])
+                if event_start <= last and event_end >= first:
+                    selected.append(row["id"])
+            return selected
+
+    def reset_events(self, event_ids: Iterable[int]) -> tuple[int, Path | None]:
+        """Back up local state, then atomically delete only confirmed ids.
+
+        Settings, drafts and the id sequence are retained. A failed backup or
+        delete leaves all schedules intact, and an empty selection writes no
+        backup. Keep the backup and deletion within the same repository lock
+        so this Store's import worker cannot slip writes between them.
+        """
+        selected = []
+        for event_id in event_ids:
+            if isinstance(event_id, bool) or not isinstance(event_id, int) or event_id < 1:
+                raise ValueError("초기화할 일정 번호는 양의 정수여야 합니다.")
+            selected.append(event_id)
+        if not selected:
+            return 0, None
+        with self._lock:
+            existing = {row[0] for row in self._db.execute("SELECT id FROM events")}
+            selected = list(dict.fromkeys(event_id for event_id in selected if event_id in existing))
+            if not selected:
+                return 0, None
+            previous = self.backup()
+            with self._db:
+                cursor = self._db.executemany("DELETE FROM events WHERE id=?", ((event_id,) for event_id in selected))
+            return cursor.rowcount, previous
+
     def due_events(self, today: date | str | None = None) -> list[Event]:
         today = today or date.today()
         today_string = today.isoformat() if isinstance(today, date) else date.fromisoformat(today).isoformat()

@@ -4,6 +4,7 @@ import unittest
 from dataclasses import asdict, replace
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 from alimi.core import Event, Store, format_event_date, parse_schedule_text, restored_source_title
 
@@ -63,6 +64,151 @@ class StoreTests(unittest.TestCase):
         self.assertEqual("open", self.store.get_event(event.id).status)
         self.assertIsNone(self.store.get_event(event.id).completed_at)
         self.assertEqual(1, len(self.store.due_events(date(2026, 10, 13))))
+
+    def test_reset_all_previews_every_status_and_preserves_local_settings(self):
+        opened = self.store.upsert_event(Event(title="등록 일정", start_date="2026-10-15", notes="일정 메모"))
+        completed = self.store.upsert_event(Event(title="완료 일정", start_date="2026-10-16"))
+        self.store.complete_event(completed.id)
+        review = self.store.upsert_event(Event(title="날짜 확인 필요", status="review"))
+        settings = {"autostart": "True", "memo_mode": "icon", "memo_draft": "로컬에 남길 초안"}
+        for key, value in settings.items():
+            self.store.set_setting(key, value)
+        before = self.store.list_events()
+        self.assertEqual([opened.id, completed.id, review.id], self.store.schedule_reset_ids())
+        count, backup_path = self.store.reset_events(self.store.schedule_reset_ids())
+        self.assertEqual(3, count)
+        self.assertTrue(backup_path.is_file())
+        self.assertEqual(self.path.parent / "backups", backup_path.parent)
+        self.assertEqual([], self.store.list_events())
+        for key, value in settings.items():
+            self.assertEqual(value, self.store.get_setting(key))
+        backup = Store(backup_path)
+        try:
+            self.assertEqual(before, backup.list_events())
+            for key, value in settings.items():
+                self.assertEqual(value, backup.get_setting(key))
+        finally:
+            backup.close()
+        self.store.restore(backup_path)
+        self.assertEqual(before, self.store.list_events())
+
+    def test_reset_range_uses_inclusive_overlap_for_all_dated_statuses(self):
+        candidates = [
+            Event(title="시작 경계", start_date="2026-10-10"),
+            Event(title="종료 경계", start_date="2026-10-20"),
+            Event(title="앞에서 겹침", start_date="2026-09-30", end_date="2026-10-10"),
+            Event(title="뒤에서 겹침", start_date="2026-10-20", end_date="2026-11-01"),
+            Event(title="기간 포함", start_date="2026-09-01", end_date="2026-12-01"),
+            Event(title="완료", start_date="2026-10-15", status="done"),
+            Event(title="확인", start_date="2026-10-15", status="review"),
+            Event(title="월 일정", start_date="2026-10-01", date_precision="month"),
+            Event(title="이전", start_date="2026-10-09"),
+            Event(title="이후", start_date="2026-10-21"),
+            Event(title="이전 월", start_date="2026-09-01", date_precision="month"),
+            Event(title="날짜 미정", status="review"),
+        ]
+        self.store.import_candidates(candidates)
+        before = self.store.list_events()
+        changes = self.store._db.total_changes
+        selected = self.store.schedule_reset_ids("2026-10-10", "2026-10-20")
+        self.assertEqual([event.id for event in candidates[:8]], selected)
+        self.assertEqual(before, self.store.list_events())
+        self.assertEqual(changes, self.store._db.total_changes)
+        count, _ = self.store.reset_events(selected)
+        self.assertEqual(8, count)
+        self.assertEqual({event.id for event in candidates[8:]}, {event.id for event in self.store.list_events()})
+
+    def test_reset_month_overlap_includes_leap_day_and_year_boundaries(self):
+        february = self.store.upsert_event(Event(title="윤년 월 일정", start_date="2028-02-01", date_precision="month"))
+        december = self.store.upsert_event(Event(title="연말 월 일정", start_date="2027-12-01", date_precision="month"))
+        year_span = self.store.upsert_event(Event(title="연말연시", start_date="2027-12-31", end_date="2028-01-02"))
+        self.assertEqual([february.id], self.store.schedule_reset_ids("2028-02-29", "2028-02-29"))
+        self.assertEqual([], self.store.schedule_reset_ids("2028-03-01", "2028-03-01"))
+        self.assertEqual([december.id, year_span.id], self.store.schedule_reset_ids("2027-12-31", "2028-01-01"))
+        self.assertEqual([year_span.id], self.store.schedule_reset_ids("2028-01-02", "2028-01-02"))
+
+    def test_reset_rejects_incomplete_noncanonical_and_reversed_periods(self):
+        event = self.store.upsert_event(Event(title="보존할 일정", start_date="2026-10-15"))
+        invalid = [(None, "2026-10-15"), ("2026-10-15", None), ("", ""),
+                   ("20261015", "2026-10-15"), ("2026-W42-4", "2026-10-15"),
+                   ("2026-02-30", "2026-10-15"), ("2026-10-16", "2026-10-15"),
+                   (date(2026, 10, 15), "2026-10-15"), (False, "2026-10-15")]
+        for start, end in invalid:
+            with self.subTest(start=start, end=end):
+                with self.assertRaises(ValueError):
+                    self.store.schedule_reset_ids(start, end)
+                self.assertEqual([event], self.store.list_events())
+        self.assertFalse((self.path.parent / "backups").exists())
+
+    def test_reset_snapshot_keeps_later_imports_and_never_reuses_deleted_ids(self):
+        first = self.store.upsert_event(Event(title="확인한 일정", start_date="2026-10-15"))
+        selected = self.store.schedule_reset_ids()
+        later = self.store.upsert_event(Event(title="확인 중 새로 가져온 일정", start_date="2026-10-15"))
+        count, backup_path = self.store.reset_events(selected + selected + [999999])
+        self.assertEqual(1, count)
+        self.assertEqual([later], self.store.list_events())
+        backup = Store(backup_path)
+        try:
+            self.assertEqual({first.id, later.id}, {event.id for event in backup.list_events()})
+        finally:
+            backup.close()
+        self.store.reset_events([later.id])
+        next_event = self.store.upsert_event(Event(title="초기화 후 새 일정", start_date="2026-10-15"))
+        self.assertGreater(next_event.id, later.id)
+        self.store.close()
+        self.store = Store(self.path)
+        self.assertEqual([next_event], self.store.list_events())
+
+    def test_reset_empty_or_already_absent_selection_does_not_create_backup(self):
+        with patch.object(self.store, "backup") as backup:
+            self.assertEqual((0, None), self.store.reset_events([]))
+            self.assertEqual((0, None), self.store.reset_events([999999]))
+            backup.assert_not_called()
+        self.assertFalse((self.path.parent / "backups").exists())
+
+    def test_reset_validates_every_id_before_any_backup_or_deletion(self):
+        event = self.store.upsert_event(Event(title="보존할 일정", start_date="2026-10-15"))
+        for invalid in (True, False, 0, -1, "1", 1.0, None):
+            with self.subTest(invalid=invalid), patch.object(self.store, "backup") as backup:
+                with self.assertRaises(ValueError):
+                    self.store.reset_events([event.id, invalid])
+                self.assertEqual([event], self.store.list_events())
+                backup.assert_not_called()
+
+    def test_reset_backup_failure_preserves_every_schedule(self):
+        event = self.store.upsert_event(Event(title="백업 실패 시 보존", start_date="2026-10-15"))
+        self.store.set_setting("memo_draft", "초안")
+        with patch.object(self.store, "backup", side_effect=OSError("디스크 기록 실패")):
+            with self.assertRaises(OSError):
+                self.store.reset_events([event.id])
+        self.assertEqual([event], self.store.list_events())
+        self.assertEqual("초안", self.store.get_setting("memo_draft"))
+
+    def test_reset_delete_failure_rolls_back_earlier_deletions(self):
+        first = self.store.upsert_event(Event(title="첫 일정", start_date="2026-10-15"))
+        second = self.store.upsert_event(Event(title="둘째 일정", start_date="2026-10-16"))
+        before = self.store.list_events()
+        self.store._db.executescript(f"""
+            CREATE TRIGGER reset_failure BEFORE DELETE ON events WHEN OLD.id={second.id}
+            BEGIN SELECT RAISE(ABORT, 'reset failed'); END;
+        """)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.reset_events([first.id, second.id])
+        self.assertEqual(before, self.store.list_events())
+        self.assertEqual(1, len(list((self.path.parent / "backups").glob("*.sqlite3"))))
+        self.store._db.execute("DROP TRIGGER reset_failure")
+        self.store._db.commit()
+        self.store.close()
+        self.store = Store(self.path)
+        self.assertEqual(before, self.store.list_events())
+
+    def test_reset_large_batch_does_not_depend_on_sqlite_parameter_limit(self):
+        events = [Event(title=f"초기화 일정 {number}", start_date="2026-10-15") for number in range(1200)]
+        self.store.import_candidates(events)
+        count, backup_path = self.store.reset_events(event.id for event in events)
+        self.assertEqual(1200, count)
+        self.assertEqual([], self.store.list_events())
+        self.assertTrue(backup_path.is_file())
 
     def test_duplicate_does_not_reopen_completed_event(self):
         candidate = Event(title="교직원 협의회", start_date="2026-10-13", time="15:30", place="2층 회의실")

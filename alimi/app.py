@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import traceback
 from dataclasses import replace
 from calendar import monthrange
@@ -23,7 +24,7 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt5.QtNetwork import QLocalServer, QLocalSocket
 from PyQt5.QtWidgets import (
-    QApplication, QCalendarWidget, QCheckBox, QComboBox, QDialog,
+    QApplication, QCalendarWidget, QCheckBox, QComboBox, QDateEdit, QDialog,
     QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMenu, QMessageBox, QPlainTextEdit, QPushButton, QStackedWidget,
@@ -364,6 +365,9 @@ class MainWindow(QMainWindow):
         self._dismissed_note_ids: set[int] = set()
         self._desktop_list_dismissed = False
         self._confirming_close = False
+        self._daily_backup_pending = False
+        self._daily_backup_retry_at = 0.0
+        self._startup_refresh_remaining = 5 if args.background else 0
         self.desktop_mode = self.store.get_setting("desktop_mode", "sticky")
         if self.desktop_mode not in ("sticky", "list"):
             self.desktop_mode = "sticky"
@@ -443,6 +447,9 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.sync_notes)
         self.timer.start(10_000)
+        self.startup_refresh_timer = QTimer(self)
+        self.startup_refresh_timer.setInterval(2_000)
+        self.startup_refresh_timer.timeout.connect(self.refresh_startup_reminders)
         self.midnight_timer = QTimer(self)
         self.midnight_timer.setSingleShot(True)
         self.midnight_timer.setTimerType(Qt.PreciseTimer)
@@ -457,6 +464,8 @@ class MainWindow(QMainWindow):
         self.refresh()
         self.apply_startup()
         self.sync_notes()
+        if self._startup_refresh_remaining:
+            self.startup_refresh_timer.start()
 
     def make_calendar_page(self):
         page = QWidget()
@@ -610,6 +619,39 @@ class MainWindow(QMainWindow):
         restore = QPushButton("백업 파일에서 복원")
         restore.clicked.connect(self.restore_data)
         layout.addWidget(restore)
+        reset_group = QGroupBox("일정 초기화")
+        reset_layout = QVBoxLayout(reset_group)
+        reset_hint = QLabel(
+            "완료·확인 필요 일정을 포함해 삭제합니다. 기간 초기화는 선택 기간과 겹치는 일정과 월 일정을 대상으로 합니다.\n"
+            "날짜 없는 일정은 전체 초기화에만 포함됩니다. 초기화 전에 자동 백업을 만듭니다."
+        )
+        reset_hint.setWordWrap(True)
+        reset_layout.addWidget(reset_hint)
+        reset_dates = QFormLayout()
+        today = QDate.currentDate()
+        self.reset_from_date = QDateEdit(QDate(today.year(), today.month(), 1))
+        self.reset_to_date = QDateEdit(QDate(today.year(), today.month(), today.daysInMonth()))
+        for control in (self.reset_from_date, self.reset_to_date):
+            control.setDisplayFormat("yyyy-MM-dd")
+            control.setCalendarPopup(True)
+            control.setDateRange(QDate(1, 1, 1), QDate(9999, 12, 31))
+        reset_dates.addRow("시작일", self.reset_from_date)
+        reset_dates.addRow("종료일", self.reset_to_date)
+        reset_layout.addLayout(reset_dates)
+        reset_buttons = QHBoxLayout()
+        self.reset_range_button = QPushButton("지정 기간 일정 초기화")
+        self.reset_range_button.clicked.connect(self.reset_schedule_range)
+        reset_buttons.addWidget(self.reset_range_button)
+        self.reset_all_button = QPushButton("전체 일정 초기화")
+        self.reset_all_button.setStyleSheet("color: #a12b21;")
+        self.reset_all_button.clicked.connect(self.reset_all_schedules)
+        reset_buttons.addWidget(self.reset_all_button)
+        reset_layout.addLayout(reset_buttons)
+        self.reset_result_label = QLabel("초기화한 일정은 자동 백업에서 복원할 수 있습니다. 설정과 메모 초안은 유지합니다.")
+        self.reset_result_label.setTextFormat(Qt.PlainText)
+        self.reset_result_label.setWordWrap(True)
+        reset_layout.addWidget(self.reset_result_label)
+        layout.addWidget(reset_group)
         privacy = QLabel("인터넷 없이 작동합니다. 원문, 문자 인식 결과, 일정과 완료 기록을 외부로 전송하지 않습니다.\n로컬 파일은 Windows 계정의 접근 권한으로 보호됩니다.")
         privacy.setWordWrap(True)
         privacy.setProperty("muted", True)
@@ -1111,11 +1153,6 @@ class MainWindow(QMainWindow):
         try:
             self.schedule_midnight()
             self.today_label.setText("오늘 날짜: " + date.today().isoformat())
-            if not self.args.smoke_test:
-                today = date.today().isoformat()
-                if self.store.get_setting("last_backup_date") != today:
-                    self.store.backup()
-                    self.store.set_setting("last_backup_date", today)
             due = self.store.reminder_events()
             font_size = int(self.store.get_setting("font_size", 12))
             if self.desktop_mode == "list":
@@ -1164,10 +1201,53 @@ class MainWindow(QMainWindow):
             self.arrange_desktop_bottom()
             self.tray.setToolTip(f"{APP_NAME} · 미완료 알림 {len(due)}개")
             self.update_note_reason(self.agenda.currentItem())
+            self.queue_daily_backup()
         except Exception:
             logging.exception("Reminder refresh failed")
             if hasattr(self, "status_label"):
                 self.status_label.setText("일정을 불러오지 못했습니다. 데이터 폴더와 저장 공간을 확인해 주세요.")
+
+    def refresh_startup_reminders(self):
+        # Explorer and display work areas can settle after a login-started app.
+        # Reuse the normal refresh so filters and tools closed by the user stay
+        # respected while their desktop layer and positions are re-applied.
+        if (QApplication.instance().property("shutting_down")
+                or self._startup_refresh_remaining <= 0):
+            self.startup_refresh_timer.stop()
+            self._startup_refresh_remaining = 0
+            return
+        self._startup_refresh_remaining -= 1
+        self.sync_notes()
+        if self._startup_refresh_remaining == 0:
+            self.startup_refresh_timer.stop()
+
+    def queue_daily_backup(self):
+        # Let the reminder windows paint before doing optional backup I/O.
+        if (self.args.smoke_test or QApplication.instance().property("shutting_down")
+                or self._daily_backup_pending or time.monotonic() < self._daily_backup_retry_at):
+            return
+        self._daily_backup_pending = True
+        QTimer.singleShot(500, self.run_daily_backup)
+
+    def run_daily_backup(self):
+        try:
+            if (self.args.smoke_test or QApplication.instance().property("shutting_down")
+                    or time.monotonic() < self._daily_backup_retry_at):
+                return
+            today = date.today().isoformat()
+            if self.store.get_setting("last_backup_date") == today:
+                return
+            self.store.backup()
+            self.store.set_setting("last_backup_date", today)
+            self._daily_backup_retry_at = 0.0
+        except Exception:
+            self._daily_backup_retry_at = time.monotonic() + 60
+            logging.exception("Automatic daily backup failed; reminders remain visible")
+            self.status_label.setText(
+                "일정은 표시되어 있습니다. 자동 백업에 실패하여 1분 후 다시 시도합니다. "
+                "데이터 폴더와 저장 공간을 확인해 주세요.")
+        finally:
+            self._daily_backup_pending = False
 
     def schedule_midnight(self):
         if not hasattr(self, "midnight_timer"):
@@ -1497,6 +1577,47 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 self.show_error(str(exc))
 
+    def reset_schedule_range(self):
+        self._reset_schedules(self.reset_from_date.date().toString("yyyy-MM-dd"),
+                              self.reset_to_date.date().toString("yyyy-MM-dd"))
+
+    def reset_all_schedules(self):
+        self._reset_schedules()
+
+    def _reset_schedules(self, start=None, end=None):
+        if self.jobs:
+            QMessageBox.information(self, "자료 분석 중", "자료 분석이 끝난 뒤 일정을 초기화해 주세요.")
+            return
+        try:
+            event_ids = self.store.schedule_reset_ids(start, end)
+            if not event_ids:
+                QMessageBox.information(self, "일정 초기화", "초기화할 일정이 없습니다.")
+                return
+            scope = f"{start} ~ {end} 기간과 겹치는 일정" if start is not None else "전체 일정 (날짜 없는 일정 포함)"
+            answer = QMessageBox.warning(
+                self, "일정 초기화 확인",
+                f"{scope} {len(event_ids)}건을 초기화할까요?\n"
+                "미완료·완료·확인 필요 일정이 삭제됩니다. 삭제 전에 자동 백업을 만들며 백업에서 복원할 수 있습니다.\n"
+                "표시 기간 설정과 메모 초안은 유지됩니다.",
+                QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel,
+            )
+            if answer != QMessageBox.Ok:
+                return
+            self.save_capture_draft()
+            deleted, backup_path = self.store.reset_events(event_ids)
+            self.import_queue.clear()
+            if self.import_dialog is not None:
+                self.import_dialog.reject()
+            self._dismissed_note_ids.difference_update(event_ids)
+            self.refresh()
+            message = f"일정 {deleted}건을 초기화했습니다."
+            if backup_path is not None:
+                message += "\n자동 백업: " + str(backup_path)
+            self.reset_result_label.setText(message)
+            self.status_label.setText(message)
+        except Exception as exc:
+            self.show_error("일정을 초기화하지 못했습니다.\n" + str(exc))
+
     def restore_data(self):
         path, _ = QFileDialog.getOpenFileName(self, "백업 복원", "", "SQLite 백업 (*.sqlite3)")
         if not path:
@@ -1520,6 +1641,8 @@ class MainWindow(QMainWindow):
 
     def on_shutdown(self):
         QApplication.instance().setProperty("shutting_down", True)
+        self.startup_refresh_timer.stop()
+        self._startup_refresh_remaining = 0
         self.draft_timer.stop()
         self.save_capture_draft()
         icon_position = self.capture_icon_position or self.capture_notepad.pos()
@@ -2099,10 +2222,54 @@ def smoke_test(app, window, store, report_path: Path):
             store.get_event(history_edit.id).status == "open" and
             store.get_event(history_other.id).status == "done" and
             window.history_table.currentRow() == -1)
+        from contextlib import closing
         from dataclasses import asdict
         def persistent_events(repository):
             return [{key: value for key, value in asdict(event).items() if key not in ("x", "y")}
                     for event in repository.list_events()]
+        reset_day = store.upsert_event(Event(title="기간 초기화 날짜 검증", start_date="2098-06-15"))
+        reset_month = store.upsert_event(Event(title="기간 초기화 월 검증", start_date="2098-06-01", date_precision="month"))
+        store.complete_event(reset_month.id)
+        reset_outside = store.upsert_event(Event(title="기간 초기화 밖 검증", start_date="2098-07-01"))
+        reset_undated = store.upsert_event(Event(title="전체 초기화 날짜 미정 검증", status="review"))
+        window.refresh()
+        window.reset_from_date.setDate(QDate(2098, 6, 15))
+        window.reset_to_date.setDate(QDate(2098, 6, 15))
+        before_reset = persistent_events(store)
+        before_backups = set(store.path.parent.glob("backups/*.sqlite3"))
+        close_with_answer(window, QMessageBox.Cancel, window.reset_range_button)
+        report["checks"]["range_reset_cancel_keeps_all_schedules"] = (
+            persistent_events(store) == before_reset and set(store.path.parent.glob("backups/*.sqlite3")) == before_backups)
+        close_with_answer(window, QMessageBox.Ok, window.reset_range_button)
+        report["checks"]["range_reset_deletes_dated_and_completed_month_only"] = (
+            store.get_event(reset_day.id) is None and store.get_event(reset_month.id) is None and
+            store.get_event(reset_outside.id) is not None and store.get_event(reset_undated.id) is not None)
+        new_backups = set(store.path.parent.glob("backups/*.sqlite3")) - before_backups
+        range_backup = next(iter(new_backups))
+        with closing(Store(range_backup)) as saved:
+            report["checks"]["range_reset_backs_up_original_schedules"] = persistent_events(saved) == before_reset
+        all_snapshot = persistent_events(store)
+        saved_draft = "일정 전체 초기화에도 유지할 메모 초안"
+        window.capture_notepad.editor.setPlainText(saved_draft)
+        saved_unlimited = store.get_setting("reminder_unlimited")
+        close_with_answer(window, QMessageBox.Ok, window.reset_all_button)
+        report["checks"]["all_reset_clears_schedule_views_and_keeps_memo_icon"] = (
+            not store.list_events() and not window.notes and
+            (window.desktop_list is None or not window.desktop_list.isVisible()) and
+            all(window.agenda.item(row).data(Qt.UserRole) is None for row in range(window.agenda.count())) and
+            window.review_table.rowCount() == 0 and
+            window.history_table.rowCount() == 0 and window.capture_notepad.isVisible())
+        report["checks"]["all_reset_preserves_draft_and_display_settings"] = (
+            store.get_setting("capture_draft") == saved_draft and
+            store.get_setting("reminder_unlimited") == saved_unlimited)
+        full_backup = next(iter(set(store.path.parent.glob("backups/*.sqlite3")) - before_backups - new_backups))
+        with closing(Store(full_backup)) as saved:
+            report["checks"]["all_reset_backs_up_remaining_events"] = persistent_events(saved) == all_snapshot
+        store.restore(full_backup)
+        window.refresh()
+        report["checks"]["reset_backup_restores_events_and_desktop_reminders"] = (
+            persistent_events(store) == all_snapshot and
+            set(window.notes) == {event.id for event in store.reminder_events()})
         before_exit = persistent_events(store)
         unfinished_before_exit = any(event["status"] == "open" for event in before_exit)
         exit_draft = "트레이 종료 직전 입력한 로컬 보존 검증 초안"
