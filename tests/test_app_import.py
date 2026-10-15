@@ -24,7 +24,7 @@ from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
 
 from alimi.app import MainWindow, make_icon
-from alimi.core import Event, Store
+from alimi.core import Event, Store, parse_schedule_text
 
 
 class FileImportUiTests(unittest.TestCase):
@@ -45,6 +45,13 @@ class FileImportUiTests(unittest.TestCase):
         self.window.show_error = self.errors.append
 
     def tearDown(self):
+        self.dispose_window()
+        self.store.close()
+        self.directory.cleanup()
+        self.app.setProperty("shutting_down", False)
+
+    def dispose_window(self):
+        """Dispose the current UI without removing the local data being tested."""
         self.window.pool.waitForDone(10_000)
         self.app.processEvents()
         self.window.timer.stop()
@@ -74,9 +81,6 @@ class FileImportUiTests(unittest.TestCase):
         self.window.deleteLater()
         self.app.sendPostedEvents(None, QEvent.DeferredDelete)
         self.app.processEvents()
-        self.store.close()
-        self.directory.cleanup()
-        self.app.setProperty("shutting_down", False)
 
     def wait_until(self, condition, message, timeout=10):
         deadline = time.monotonic() + timeout
@@ -427,6 +431,182 @@ class FileImportUiTests(unittest.TestCase):
         self.assertEqual("붙여넣은 텍스트", events[0].source)
         self.assertEqual([], self.errors)
 
+    def test_pasted_full_body_corrections_do_not_reanalyze_or_change_schedule_candidates(self):
+        original = ("안내문을 읽고 확인해 주세요.\n\n"
+                    "2099년 10월 15일 15:30 교직원 협의회\n\n"
+                    "준비물은 개인 필기구입나다.\n문의는 행정실로 해 주세요.")
+        corrected = original.replace("필기구입나다", "필기구입니다")
+        pasted = QMimeData()
+        pasted.setText(original)
+        self.window.text_input.insertFromMimeData(pasted)
+        dialog = self.preview()
+        self.assertEqual(original, dialog.recognized_editor.toPlainText())
+        self.assertFalse(dialog.recognized_editor.isReadOnly())
+        self.assertEqual(1, dialog.table.rowCount())
+        before_rows = [[dialog.table.item(row, column).text()
+                        for column in range(dialog.table.columnCount())]
+                       for row in range(dialog.table.rowCount())]
+        before_candidates = [vars(event).copy() for event in dialog._events]
+        before_queue = list(self.window.import_queue)
+        original_source = dialog._events[0].source_text
+        with patch("alimi.app.parse_schedule_text", wraps=parse_schedule_text) as parse, \
+                patch.object(self.window.ocr, "recognize") as recognize:
+            dialog.recognized_editor.setPlainText(corrected)
+            QTest.qWait(350)
+            self.assertEqual(before_rows, [[dialog.table.item(row, column).text()
+                                           for column in range(dialog.table.columnCount())]
+                                          for row in range(dialog.table.rowCount())])
+            self.assertEqual(before_candidates, [vars(event).copy() for event in dialog._events])
+            self.assertEqual(before_queue, self.window.import_queue)
+            self.assertIs(dialog, self.window.import_dialog)
+            self.assertEqual([], self.store.list_events())
+            self.assertEqual(corrected, self.window.text_input.toPlainText())
+            self.assertEqual(corrected, self.window.capture_notepad.editor.toPlainText())
+            self.assertEqual(corrected, self.store.get_setting("capture_draft"))
+            self.register()
+            parse.assert_not_called()
+            recognize.assert_not_called()
+        saved = self.store.list_events()
+        self.assertEqual(1, len(saved))
+        self.assertEqual(("2099-10-15", "15:30", "open"),
+                         (saved[0].start_date, saved[0].time, saved[0].status))
+        self.assertEqual(original_source, saved[0].source_text)
+        self.assertIn(corrected, self.window.import_result.toPlainText())
+        self.assertNotIn("필기구입나다", self.window.import_result.toPlainText())
+
+    def test_recognized_body_correction_keeps_completed_schedule_metadata_unchanged(self):
+        original = "2099년 10월 15일 협의회\n담당자에게 자료를 전다래 주세요."
+        corrected = original.replace("전다래", "전달해")
+        self.window.receive_import_text(original, "안내문.txt")
+        self.register()
+        event = self.store.list_events()[0]
+        self.store.complete_event(event.id)
+        self.store.update_position(event.id, 123, 234)
+        before = self.store.get_event(event.id)
+        self.window.receive_import_text(original, "안내문.txt")
+        dialog = self.preview()
+        self.assertEqual(before.id, dialog._events[0].id)
+        dialog.recognized_editor.setPlainText(corrected)
+        self.assertEqual([before], self.store.list_events())
+        self.assertEqual(before.source_text, dialog.source_text.toPlainText())
+        self.register()
+        self.assertEqual([before], self.store.list_events(),
+                         "Editing the recognized body must not update or reopen an existing schedule.")
+        self.assertNotIn(before.id, self.window.notes)
+        self.assertIn(corrected, self.window.import_result.toPlainText())
+
+    def test_cancel_preserves_corrected_body_but_discards_unregistered_schedule_edits(self):
+        original = "2099년 10월 15일 협의회\n공통 안내 내용입나다."
+        corrected = original.replace("입나다", "입니다")
+        self.window.receive_import_text(original, "붙여넣은 텍스트")
+        dialog = self.preview()
+        original_title = dialog.table.item(0, dialog.TITLE).text()
+        dialog.table.item(0, dialog.TITLE).setText("취소한 일정 제목 수정")
+        dialog.recognized_editor.setPlainText(corrected)
+        dialog.cancel_button.click()
+        self.app.processEvents()
+        self.assertIsNone(self.window.import_dialog)
+        self.assertEqual([], self.store.list_events())
+        self.window.save_capture_draft()
+        self.assertEqual(corrected, self.store.get_setting("capture_draft"))
+        self.window.review_capture_draft()
+        reopened = self.preview()
+        self.assertEqual(corrected, reopened.recognized_editor.toPlainText())
+        self.assertEqual(original_title, reopened.table.item(0, reopened.TITLE).text())
+        self.assertEqual([], self.store.list_events())
+
+    def test_zero_schedule_body_is_editable_and_reloaded_after_shutdown(self):
+        original = "날짜 없는 일반 안내입니다.\n맞춤뻡을 확인해 주세요."
+        corrected = original.replace("맞춤뻡", "맞춤법")
+        self.window.receive_import_text(original, "클립보드 / 드래그 이미지")
+        dialog = self.preview()
+        self.assertEqual(0, dialog.table.rowCount())
+        self.assertEqual(original, dialog.recognized_editor.toPlainText())
+        dialog.recognized_editor.setPlainText(corrected)
+        self.assertEqual([], self.store.list_events())
+        # Exit before the debounce timer fires: shutdown must flush the edit.
+        self.dispose_window()
+        self.store.close()
+        self.store = Store(self.data_dir / "alimi.sqlite3")
+        self.assertEqual(corrected, self.store.get_setting("capture_draft"))
+        self.assertEqual(corrected, self.store.get_setting("recognized_text_draft"))
+        self.app.setProperty("shutting_down", False)
+        args = SimpleNamespace(data_dir=self.data_dir, no_autostart=True,
+                               smoke_test=True, background=False)
+        self.window = MainWindow(self.store, args, make_icon())
+        self.window.show_error = self.errors.append
+        self.assertEqual(corrected, self.window.text_input.toPlainText())
+        self.assertEqual(corrected, self.window.capture_notepad.editor.toPlainText())
+        self.window.review_capture_draft()
+        reopened = self.preview()
+        self.assertEqual(corrected, reopened.recognized_editor.toPlainText())
+        self.assertEqual(0, reopened.table.rowCount())
+        self.assertEqual([], self.store.list_events())
+
+    def test_edited_recognition_and_unrelated_notepad_draft_persist_independently(self):
+        manual = "사용자가 따로 작성한 메모입니다.\n인식한 문서와 바꾸면 안 됩니다."
+        original = "2099년 10월 15일 협의회\n문서의 안내를 확인하새요."
+        corrected = original.replace("확인하새요", "확인하세요")
+        notepad = self.open_notepad()
+        notepad.editor.setPlainText(manual)
+        self.window.receive_import_text(original, "별도 안내문.txt")
+        dialog = self.preview()
+        self.assertEqual(manual, notepad.editor.toPlainText())
+        dialog.recognized_editor.setPlainText(corrected)
+        self.assertEqual(corrected, self.window.text_input.toPlainText())
+        self.assertEqual(manual, notepad.editor.toPlainText(),
+                         "Editing an imported body must not replace an unrelated manual memo.")
+        self.assertEqual(1, dialog.table.rowCount())
+        # Both independent drafts must survive exit, including pending edits.
+        self.dispose_window()
+        self.store.close()
+        self.store = Store(self.data_dir / "alimi.sqlite3")
+        self.assertEqual(manual, self.store.get_setting("capture_draft"))
+        self.assertEqual(corrected, self.store.get_setting("recognized_text_draft"))
+        self.app.setProperty("shutting_down", False)
+        args = SimpleNamespace(data_dir=self.data_dir, no_autostart=True,
+                               smoke_test=True, background=False)
+        self.window = MainWindow(self.store, args, make_icon())
+        self.window.show_error = self.errors.append
+        self.assertEqual(manual, self.window.capture_notepad.editor.toPlainText())
+        self.assertEqual(corrected, self.window.text_input.toPlainText())
+        self.assertEqual([], self.store.list_events())
+        self.window.analyze_button.click()
+        reopened = self.preview()
+        self.assertEqual(corrected, reopened.recognized_editor.toPlainText())
+        self.assertEqual(1, reopened.table.rowCount())
+        self.assertEqual(manual, self.window.capture_notepad.editor.toPlainText())
+        self.assertEqual([], self.store.list_events())
+
+    def test_corrected_file_body_is_used_on_explicit_reanalysis_instead_of_stale_records(self):
+        first = self.document("first-edit.txt", "2099년 9월 10일 원래 첫 일정\n오타 안내문")
+        second = self.document("second-edit.txt", "2099년 10월 15일 원래 둘째 일정")
+        for files in ([first], [first, second]):
+            with self.subTest(files=[path.name for path in files]):
+                self.window.import_file_paths([str(path) for path in files])
+                self.wait_for_import()
+                dialog = self.preview()
+                self.assertEqual(len(files), len(self.window.import_preview_records))
+                corrected = "2099년 11월 20일 수정한 인식 내용의 일정\n일정 외 안내도 고쳤습니다."
+                dialog.recognized_editor.setPlainText(corrected)
+                self.assertEqual([], self.window.import_preview_records)
+                self.assertEqual(len(files), dialog.table.rowCount(),
+                                 "The current review stays unchanged until explicit reanalysis.")
+                dialog.reject()
+                self.app.processEvents()
+                source = ", ".join(path.name for path in files)
+                with patch("alimi.app.parse_schedule_text", wraps=parse_schedule_text) as parse:
+                    self.window.analyze_button.click()
+                    parse.assert_called_once_with(corrected, source=source)
+                new_dialog = self.preview()
+                self.assertEqual(corrected, new_dialog.recognized_editor.toPlainText())
+                self.assertEqual(1, new_dialog.table.rowCount())
+                self.assertEqual("2099-11-20", new_dialog.table.item(0, new_dialog.DATE).text())
+                self.assertIn("수정한 인식 내용", new_dialog.table.item(0, new_dialog.TITLE).text())
+                self.assertEqual([], self.store.list_events())
+                new_dialog.reject()
+                self.app.processEvents()
+
     def test_imminent_paste_stays_unregistered_and_hidden_until_final_confirmation(self):
         deadline = date.today() + timedelta(days=3)
         pasted = QMimeData()
@@ -560,6 +740,32 @@ class FileImportUiTests(unittest.TestCase):
         self.assertIn("이미지에서 읽은", self.window.capture_notepad.editor.toPlainText())
         self.register()
         self.assertEqual("2099-10-15", self.store.list_events()[0].start_date)
+
+    def test_image_ocr_body_can_be_corrected_without_running_ocr_again(self):
+        recognized = "담당자 안내입나다.\n2099년 10월 15일 이미지에서 읽은 일정\n자료는 첨부를 참고하세요."
+        corrected = recognized.replace("안내입나다", "안내입니다")
+        mime = QMimeData()
+        image = QImage(3, 3, QImage.Format_RGB32)
+        image.fill(Qt.white)
+        mime.setImageData(image)
+        notepad = self.open_notepad()
+        with patch.object(self.window.ocr, "recognize", return_value=recognized) as recognize:
+            notepad.editor.insertFromMimeData(mime)
+            self.wait_for_import()
+            dialog = self.preview()
+            self.assertEqual(recognized, dialog.recognized_editor.toPlainText())
+            original_source = dialog._events[0].source_text
+            dialog.recognized_editor.setPlainText(corrected)
+            self.assertEqual(corrected, notepad.editor.toPlainText())
+            self.assertEqual(1, dialog.table.rowCount())
+            self.assertEqual([], self.store.list_events())
+            self.register()
+            recognize.assert_called_once()
+        saved = self.store.list_events()
+        self.assertEqual(1, len(saved))
+        self.assertEqual("2099-10-15", saved[0].start_date)
+        self.assertEqual(original_source, saved[0].source_text)
+        self.assertIn(corrected, self.window.import_result.toPlainText())
 
     def test_multiple_files_share_one_preview_and_preserve_each_source(self):
         first = self.document("first.txt", "2099년 9월 10일 첫 번째 평가")

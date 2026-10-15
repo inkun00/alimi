@@ -438,6 +438,7 @@ class MainWindow(QMainWindow):
         self.status_label.setProperty("muted", True)
         outer.addWidget(self.status_label)
         self.make_capture_notepad()
+        self.text_input.textChanged.connect(lambda: self.draft_timer.start(300))
         self.make_tray()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.sync_notes)
@@ -508,6 +509,7 @@ class MainWindow(QMainWindow):
             row.addWidget(button)
         layout.addLayout(row)
         self.text_input = MimeTextEdit()
+        self.text_input.setPlainText(self.store.get_setting("recognized_text_draft", ""))
         self.import_preview = None
         self.text_input.payload_received.connect(lambda payload: self.receive_import_payload(payload, "manager"))
         self.text_input.setPlaceholderText("공지를 붙여넣거나 위에서 파일을 선택해 주세요.\n파일에서 읽은 원문도 이곳에 표시됩니다.\n예: 2026년 10월 13일(화) 15:30 교직원 협의회, 장소: 2층 회의실")
@@ -725,6 +727,7 @@ class MainWindow(QMainWindow):
     def save_capture_draft(self):
         if self.capture_notepad:
             self.store.set_setting("capture_draft", self.capture_notepad.editor.toPlainText())
+            self.store.set_setting("recognized_text_draft", self.text_input.toPlainText())
 
     def save_capture_position(self, x, y):
         self.capture_icon_position = QPoint(x, y)
@@ -1266,6 +1269,19 @@ class MainWindow(QMainWindow):
         self.text_input.setPlainText(text)
         self.process_import(text, source)
 
+    def sync_recognized_text(self, text, source):
+        """Keep edited recognition text as a draft without parsing schedules."""
+        previous_text = self.text_input.toPlainText()
+        self.import_preview = (text.strip(), source)
+        # Once the combined text is edited, per-file snapshots no longer
+        # describe it. A later explicit analysis must read the edited text.
+        self.import_preview_records = []
+        if self.text_input.toPlainText() != text:
+            self.text_input.setPlainText(text)
+        if self.capture_notepad.editor.toPlainText() in ("", previous_text):
+            self.capture_notepad.set_draft(text)
+        self.draft_timer.start(300)
+
     def process_import(self, text, source):
         try:
             self._process_import(text, source)
@@ -1300,12 +1316,14 @@ class MainWindow(QMainWindow):
                 existing_ids.add(existing.id)
             review_candidates.append(existing or candidate)
         candidates = review_candidates
-        dialog = ImportReviewDialog(candidates, errors=errors)
+        dialog = ImportReviewDialog(candidates, errors=errors, recognized_text=text)
         dialog.setWindowIcon(self.icon)
         if not candidates:
             dialog.source_text.setPlainText(text)
         self.import_dialog = dialog
-        dialog.confirmed.connect(lambda selected: self.confirm_import(dialog, selected, source, text))
+        dialog.recognized_text_changed.connect(lambda edited: self.sync_recognized_text(edited, source))
+        dialog.confirmed.connect(lambda selected: self.confirm_import(
+            dialog, selected, source, dialog.recognized_editor.toPlainText()))
         def finished(result):
             if self.import_dialog is dialog:
                 self.import_dialog = None
@@ -1707,11 +1725,20 @@ def smoke_test(app, window, store, report_path: Path):
         QTimer.singleShot(250, loop.quit)
         loop.exec_()
         report["checks"]["paste_requires_final_confirmation"] = window.import_dialog is not None and not any("붙여넣기 검증" in e.title for e in store.list_events())
+        recognized_dialog = window.import_dialog
+        recognized_before = recognized_dialog.selected_events()
+        corrected_body = recognized_dialog.recognized_editor.toPlainText() + "\n안내: 일정 외 인식 텍스트도 수정할 수 있습니다."
+        recognized_dialog.recognized_editor.setPlainText(corrected_body)
+        report["checks"]["recognized_body_edit_leaves_schedule_fields_unchanged"] = (
+            recognized_dialog.selected_events() == recognized_before and window.text_input.toPlainText() == corrected_body)
+        window.save_capture_draft()
+        report["checks"]["recognized_body_edit_saved_locally"] = store.get_setting("recognized_text_draft") == corrected_body
         window.import_dialog.table.item(0, ImportReviewDialog.TITLE).setText("수정한 붙여넣기 검증 회의")
         window.import_dialog.grab().save(str(report_path.with_name(report_path.stem + "-confirmation.png")))
         window.import_dialog.register_button.click()
         app.processEvents()
         report["checks"]["paste_edits_saved_only_after_register"] = any(e.title == "수정한 붙여넣기 검증 회의" for e in store.list_events())
+        report["checks"]["registered_result_keeps_corrected_recognized_body"] = corrected_body in window.import_result.toPlainText()
         capture.editor.setPlainText("2099년 10월 15일 취소 검증 회의")
         window.review_capture_draft()
         report["checks"]["typed_draft_opens_confirmation"] = window.import_dialog is not None and not any("취소 검증" in e.title for e in store.list_events())

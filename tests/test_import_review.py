@@ -12,7 +12,7 @@ import onnxruntime
 onnxruntime.disable_telemetry_events()
 
 from PyQt5.QtCore import QEvent, Qt
-from PyQt5.QtWidgets import QApplication, QDialog
+from PyQt5.QtWidgets import QApplication, QDialog, QTabWidget
 
 from alimi.core import Event
 from alimi.review import ImportReviewDialog
@@ -38,8 +38,9 @@ class ImportReviewTests(unittest.TestCase):
         self.app.sendPostedEvents(None, QEvent.DeferredDelete)
         self.app.processEvents()
 
-    def dialog(self, candidates=None, errors=None):
-        window = ImportReviewDialog([self.event] if candidates is None else candidates, errors)
+    def dialog(self, candidates=None, errors=None, *, recognized_text=None):
+        window = ImportReviewDialog([self.event] if candidates is None else candidates, errors,
+                                    recognized_text=recognized_text)
         self.windows.append(window)
         window.show()
         self.app.processEvents()
@@ -53,6 +54,88 @@ class ImportReviewTests(unittest.TestCase):
         self.assertEqual(Qt.NonModal, window.windowModality())
         self.assertEqual("원래 공지 원문", window.source_text.toPlainText())
         self.assertTrue(window.source_text.isReadOnly())
+
+    def test_full_recognized_text_is_the_default_editable_tab(self):
+        full_text = "가정통신문\n인식한 안내 문구입니다.\n2026년 10월 13일 교직원 회의\n회신은 담당자에게 전달하세요."
+        window = self.dialog(recognized_text=full_text)
+        tabs = window.findChild(QTabWidget)
+        self.assertEqual("인식한 텍스트", tabs.tabText(tabs.currentIndex()))
+        self.assertTrue(window.recognized_editor.isVisible())
+        self.assertFalse(window.recognized_editor.isReadOnly())
+        self.assertEqual(full_text, window.recognized_editor.toPlainText())
+        self.assertEqual("원래 공지 원문", window.source_text.toPlainText())
+        self.assertEqual("일정 원문 (참고)", tabs.tabText(tabs.indexOf(window.source_text)))
+
+    def test_recognized_body_edits_do_not_change_schedules_or_input_events(self):
+        existing = replace(self.event, id=17, status="done", completed_at="2026-10-14T00:00:00Z")
+        original = replace(existing)
+        window = self.dialog([existing], recognized_text="날짜 없는 전체 안내문")
+        selected_before = window.selected_events()
+        changed = []
+        window.recognized_text_changed.connect(changed.append)
+        window.recognized_editor.selectAll()
+        window.recognized_editor.insertPlainText("일정 이외 안내문과 오타를 수정했습니다.")
+        self.assertEqual(["일정 이외 안내문과 오타를 수정했습니다."], changed)
+        self.assertEqual(selected_before, window.selected_events())
+        self.assertIsNone(window.selected_events()[0].id, "Body edits must not request an existing schedule update.")
+        self.assertEqual(original, existing)
+        self.assertEqual(original.source_text, window.source_text.toPlainText())
+
+    def test_empty_schedule_result_keeps_all_recognized_content_editable(self):
+        body = "안내드립니다.\n별도의 일정 없이 참고만 해주세요."
+        window = self.dialog([], recognized_text=body)
+        changed, confirmed = [], []
+        window.recognized_text_changed.connect(changed.append)
+        window.confirmed.connect(confirmed.append)
+        self.assertTrue(window.recognized_editor.isEnabled())
+        self.assertEqual(body, window.recognized_editor.toPlainText())
+        window.recognized_editor.moveCursor(window.recognized_editor.textCursor().End)
+        window.recognized_editor.insertPlainText("\n추가 안내입니다.")
+        self.assertEqual([body + "\n추가 안내입니다."], changed)
+        self.assertEqual(0, window.table.rowCount())
+        window.register_button.click()
+        self.assertEqual([], confirmed)
+        self.assertEqual(0, window.table.rowCount())
+
+    def test_recognized_body_is_preserved_when_rows_switch_append_and_delete(self):
+        window = self.dialog(recognized_text="전체 원문")
+        changed = []
+        window.recognized_text_changed.connect(changed.append)
+        window.recognized_editor.setPlainText("수정한 전체 원문")
+        window.append_candidates([replace(self.event, title="두 번째 일정", source_text="두 번째 행 원문")])
+        window.table.setCurrentCell(1, window.TITLE)
+        self.assertEqual("두 번째 행 원문", window.source_text.toPlainText())
+        window.table.setCurrentCell(0, window.TITLE)
+        window.delete_current_event()
+        window.delete_current_event()
+        self.assertEqual(0, window.table.rowCount())
+        self.assertEqual("수정한 전체 원문", window.recognized_editor.toPlainText())
+        self.assertTrue(window.recognized_editor.isEnabled())
+        self.assertEqual(["수정한 전체 원문"], changed)
+
+    def test_recognized_fallback_deduplicates_sources_from_one_shot_iterable(self):
+        events = (event for event in [self.event, replace(self.event, title="같은 자료"),
+                  replace(self.event, title="다른 자료", source_text="두 번째 원문")])
+        window = self.dialog(events)
+        self.assertEqual(3, window.table.rowCount())
+        self.assertEqual("원래 공지 원문\n\n두 번째 원문", window.recognized_editor.toPlainText())
+        explicit_empty = self.dialog([self.event], recognized_text="")
+        self.assertEqual("", explicit_empty.recognized_editor.toPlainText())
+
+    def test_cancel_keeps_recognized_draft_edit_signal_without_registering_schedules(self):
+        window = self.dialog(recognized_text="인식한 안내문")
+        changed, confirmed = [], []
+        window.recognized_text_changed.connect(changed.append)
+        window.confirmed.connect(confirmed.append)
+        window.recognized_editor.setPlainText("고친 안내문")
+        window.table.item(0, window.TITLE).setText("저장하지 않을 일정 수정")
+        window.cancel_button.click()
+        self.assertEqual(["고친 안내문"], changed)
+        self.assertEqual([], confirmed)
+        self.assertEqual([], window.confirmed_events)
+        self.assertEqual(QDialog.Rejected, window.result())
+        self.assertEqual("교직원 회의", self.event.title)
+        self.assertEqual("원래 공지 원문", self.event.source_text)
 
     def test_edits_are_cloned_and_confirm_only_requests_owner_commit(self):
         window = self.dialog()

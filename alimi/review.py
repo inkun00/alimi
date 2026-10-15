@@ -26,10 +26,13 @@ class ImportReviewDialog(QDialog):
     """
 
     confirmed = pyqtSignal(object)
+    recognized_text_changed = pyqtSignal(str)
     INCLUDE, TITLE, DATE, END_DATE, TIME, PLACE = range(6)
 
-    def __init__(self, candidates: Iterable[Event], errors: list[str] | None = None, parent=None):
+    def __init__(self, candidates: Iterable[Event], errors: list[str] | None = None, parent=None,
+                 *, recognized_text: str | None = None):
         super().__init__(parent)
+        candidates = list(candidates)
         self.setWindowTitle("일정 확인 후 등록")
         self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowCloseButtonHint)
         self.setWindowModality(Qt.NonModal)
@@ -80,13 +83,32 @@ class ImportReviewDialog(QDialog):
         self.source_label.setWordWrap(True)
         details_layout.addWidget(self.source_label)
         tabs = QTabWidget()
+        recognized_page = QWidget()
+        recognized_layout = QVBoxLayout(recognized_page)
+        recognized_layout.setContentsMargins(0, 8, 0, 0)
+        recognized_help = QLabel(
+            "인식한 내용을 자유롭게 수정할 수 있습니다. 위 일정 표의 내용은 바뀌지 않습니다.\n"
+            "수정한 텍스트는 관리 창 입력칸에 반영되고 PC에 자동 저장됩니다."
+        )
+        recognized_help.setWordWrap(True)
+        recognized_layout.addWidget(recognized_help)
+        self.recognized_editor = QPlainTextEdit()
+        self.recognized_editor.setAccessibleName("인식한 텍스트 수정")
+        self.recognized_editor.setPlaceholderText("일정 외 안내 내용과 인식 오류도 수정할 수 있습니다.")
+        if recognized_text is None:
+            recognized_text = "\n\n".join(dict.fromkeys(event.source_text for event in candidates if event.source_text))
+        self.recognized_editor.setPlainText(recognized_text)
+        self.recognized_editor.textChanged.connect(
+            lambda: self.recognized_text_changed.emit(self.recognized_editor.toPlainText()))
+        recognized_layout.addWidget(self.recognized_editor, 1)
+        tabs.addTab(recognized_page, "인식한 텍스트")
         self.notes_editor = QPlainTextEdit()
         self.notes_editor.setPlaceholderText("선택한 일정의 세부 내용을 수정할 수 있습니다.")
         self.notes_editor.textChanged.connect(self._notes_changed)
         tabs.addTab(self.notes_editor, "세부 내용")
         self.source_text = QPlainTextEdit()
         self.source_text.setReadOnly(True)
-        tabs.addTab(self.source_text, "원문")
+        tabs.addTab(self.source_text, "일정 원문 (참고)")
         details_layout.addWidget(tabs)
         splitter.addWidget(details)
         splitter.setStretchFactor(0, 3)
@@ -122,7 +144,9 @@ class ImportReviewDialog(QDialog):
             super().closeEvent(event)
             return
         answer = QMessageBox.warning(
-            self, "일정 확인 창 닫기", "확인 창을 닫을까요?\n등록하지 않은 수정 내용은 저장되지 않습니다.",
+            self, "일정 확인 창 닫기",
+            "확인 창을 닫을까요?\n등록하지 않은 일정 수정 내용은 저장되지 않습니다.\n"
+            "수정한 인식 텍스트는 PC에 초안으로 보관됩니다.",
             QMessageBox.Ok | QMessageBox.Cancel, QMessageBox.Cancel,
         )
         if answer == QMessageBox.Ok:
