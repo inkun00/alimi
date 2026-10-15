@@ -13,15 +13,138 @@ import hashlib
 import importlib.util
 import math
 from pathlib import Path
+import re
+import statistics
 import sys
 import threading
 import unicodedata
+from dataclasses import dataclass
 
 
 MODELS = {
     "ch_PP-OCRv5_det_mobile.onnx": "4d97c44a20d30a81aad087d6a396b08f786c4635742afc391f6621f5c6ae78ae",
     "korean_PP-OCRv5_rec_mobile.onnx": "cd6e2ea50f6943ca7271eb8c56a877a5a90720b7047fe9c41a2e541a25773c9b",
 }
+
+
+@dataclass(frozen=True)
+class _TextFragment:
+    left: float
+    top: float
+    right: float
+    bottom: float
+    text: str
+
+    @property
+    def cy(self):
+        return (self.top + self.bottom) / 2
+
+    @property
+    def height(self):
+        return self.bottom - self.top
+
+
+def _text_rows(fragments):
+    """Keep ordinary document/table rows intact without mixing panel columns."""
+    rows = []
+    for fragment in sorted(fragments, key=lambda item: (item.top, item.left)):
+        target = next((row for row in rows if abs(row[0].cy - fragment.cy)
+                       <= max(8.0, min(row[0].height, fragment.height) * 0.45)), None)
+        if target is None:
+            rows.append([fragment])
+        else:
+            target.append(fragment)
+    return [sorted(row, key=lambda item: item.left)
+            for row in sorted(rows, key=lambda row: row[0].cy)]
+
+
+def _rows_text(fragments):
+    return "\n".join("  ".join(item.text for item in row) for row in _text_rows(fragments))
+
+
+_MONTH_HEADING = re.compile(r"(?:(\d{4})\s*(?:년|[.])\s*)?(1[0-2]|[1-9])\s*월[.]?")
+_SCHOOL_DAY_TOTAL = re.compile(r"수업\s*일수\s*[:：]?\s*\d+\s*일?\s*")
+_CALENDAR_DATE_START = re.compile(r"^[^\w가-힣]*\d{1,2}\s*(?:일(?=\s|$)|[（(]|[./]\s*\d{1,2})")
+
+
+def _grid_numbers(text):
+    tokens = text.split()
+    return bool(tokens) and all(token.isdecimal() and 1 <= int(token) <= 31 for token in tokens)
+
+
+def _calendar_body(fragments):
+    return [item for item in fragments if any(ch.isalnum() for ch in item.text)
+            and not _grid_numbers(item.text)
+            and not _SCHOOL_DAY_TOTAL.fullmatch(item.text.strip())]
+
+
+def _calendar_date_rows(fragments):
+    """Count observable leading dates, without guessing or rewriting dates."""
+    return sum(bool(_CALENDAR_DATE_START.match(" ".join(item.text for item in row)))
+               for row in _text_rows(fragments))
+
+
+@dataclass(frozen=True)
+class _CalendarPanel:
+    heading: _TextFragment
+    left: float
+    top: float
+    right: float
+    bottom: float
+    fragments: tuple[_TextFragment, ...]
+
+
+def _calendar_panels(fragments, width, height):
+    """Recognize a month-panel calendar only with weekday and numeric grids.
+
+    A normal table with month headings must retain its original row order. The
+    repeated 7-day calendars provide the extra evidence needed to read each
+    month's list down its own column instead of joining neighboring schedules.
+    Coordinates come from OCR boxes, never a particular document template.
+    """
+    headings = [item for item in fragments if _MONTH_HEADING.fullmatch(item.text.strip())]
+    heading_rows = _text_rows(headings)
+    if not heading_rows or any(len(row) < 2 for row in heading_rows):
+        return []
+    panels = []
+    for index, headers in enumerate(heading_rows):
+        centers = [(item.left + item.right) / 2 for item in headers]
+        gaps = [right - left for left, right in zip(centers, centers[1:])]
+        spacing = statistics.median(gaps)
+        if min(gaps) < max(item.height for item in headers) * 3 or max(gaps) > min(gaps) * 1.5:
+            return []
+        months = [_MONTH_HEADING.fullmatch(item.text.strip()).group(2) for item in headers]
+        if len(set(months)) != len(months):
+            return []
+        boundaries = [max(0, centers[0] - spacing / 2)]
+        boundaries.extend((left + right) / 2 for left, right in zip(centers, centers[1:]))
+        boundaries.append(min(width, centers[-1] + spacing / 2))
+        bottom = min(item.top for item in heading_rows[index + 1]) if index + 1 < len(heading_rows) else height
+        for column, heading in enumerate(headers):
+            left, right = boundaries[column:column + 2]
+            inside = [item for item in fragments
+                      if heading.cy < item.cy < bottom and left <= (item.left + item.right) / 2 < right]
+            rows = _text_rows(inside)
+            weekdays = next((n for n, row in enumerate(rows)
+                             if sum(sum(ch in "일월화수목금토" for ch in item.text)
+                                    for item in row if all(ch in "일월화수목금토 " for ch in item.text)) >= 5), None)
+            if weekdays is None or weekdays > 1:
+                return []
+            grid = []
+            for row in rows[weekdays + 1:]:
+                if not all(_grid_numbers(item.text) for item in row):
+                    break
+                grid.append(row)
+            if len(grid) < 3 or sum(len(item.text.split()) for row in grid for item in row) < 14:
+                return []
+            last_grid = grid[-1]
+            # Include a little blank space after the last number row. Keeping
+            # the original fragment fallback prevents losing a faint first list
+            # line if the refined detector does not rediscover it.
+            top = max(item.cy for item in last_grid) + min(item.height for item in last_grid) * 0.25
+            body = tuple(_calendar_body([item for item in inside if item.cy > top]))
+            panels.append(_CalendarPanel(heading, left, top, right, bottom, body))
+    return panels
 
 
 class OcrEngine:
@@ -172,6 +295,45 @@ class OcrEngine:
             return ""
         return unicodedata.normalize("NFC", "".join(chars)).strip()
 
+    def _read_fragments(self, pixels):
+        fragments = []
+        for box in self._detect(pixels):
+            text = self._read_box(pixels, box)
+            if text:
+                fragments.append(_TextFragment(float(box[:, 0].min()), float(box[:, 1].min()),
+                                               float(box[:, 0].max()), float(box[:, 1].max()), text))
+        return fragments
+
+    def _calendar_text(self, pixels, fragments):
+        import cv2
+        height, width = pixels.shape[:2]
+        panels = _calendar_panels(fragments, width, height)
+        if not panels:
+            return None
+        first_heading = min(panel.heading.top for panel in panels)
+        preamble = [item for item in fragments if item.cy < first_heading]
+        output = [_rows_text(preamble)] if preamble else []
+        for panel in panels:
+            body = list(panel.fragments)
+            if body and statistics.median(item.height for item in body) < 26:
+                # Small calendar print benefits from a second detection pass on
+                # its own enlarged panel, without neighboring month columns.
+                crop = pixels[max(0, int(panel.top)):min(height, math.ceil(panel.bottom)),
+                              max(0, int(panel.left)):min(width, math.ceil(panel.right))]
+                if min(crop.shape[:2]) >= 4:
+                    try:
+                        refined = _calendar_body(self._read_fragments(cv2.resize(crop, None, fx=2, fy=2,
+                                                                                interpolation=cv2.INTER_CUBIC)))
+                        if (len(_text_rows(refined)) >= len(_text_rows(body))
+                                and _calendar_date_rows(refined) >= _calendar_date_rows(body)):
+                            body = refined
+                    except Exception:
+                        # Refinement is optional: the successfully recognized
+                        # original list must survive a failed second OCR pass.
+                        pass
+            output.extend((panel.heading.text, _rows_text(body)))
+        return "\n".join(text for text in output if text)
+
     def recognize(self, image) -> str:
         """Return detected Korean/Latin text in reading order for a PIL image.
 
@@ -193,21 +355,10 @@ class OcrEngine:
             if max(rgb.size) > 6000:
                 rgb.thumbnail((6000, 6000))
             pixels = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2BGR)
-            boxes = self._detect(pixels)
-            fragments = []
-            for box in boxes:
-                text = self._read_box(pixels, box)
-                if text:
-                    fragments.append((float(box[:, 1].mean()), float(box[:, 0].min()),
-                                      float(box[:, 1].max() - box[:, 1].min()), text))
+            fragments = self._read_fragments(pixels)
+            calendar_text = self._calendar_text(pixels, fragments)
+            if calendar_text is not None:
+                return calendar_text
             # Preserve one source table row as one text line where possible,
             # which keeps its event title and date together during extraction.
-            rows = []
-            for cy, x, h, text in fragments:
-                target = next((row for row in rows if abs(row["y"] - cy) <= max(8.0, min(row["h"], h) * 0.45)), None)
-                if target is None:
-                    rows.append({"y": cy, "h": h, "items": [(x, text)]})
-                else:
-                    target["items"].append((x, text))
-            rows.sort(key=lambda row: row["y"])
-            return "\n".join("  ".join(text for _, text in sorted(row["items"])) for row in rows)
+            return _rows_text(fragments)

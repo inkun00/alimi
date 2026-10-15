@@ -223,6 +223,63 @@ class FileImportUiTests(unittest.TestCase):
         self.assertIn("새 일정 2건", self.window.import_result.toPlainText())
         self.assertEqual([], self.errors)
 
+    def test_calendar_image_import_joins_month_headers_to_days_before_registration(self):
+        text = (
+            "주요 학사일정\n2021. 3월\n일 월 화 수 목 금 토\n1 2 3 4 5 6\n"
+            "1(월) 삼일절\n2(화)~5(금) 학교 적응 주간\n수업일수: 22일\n"
+            "4월\n12(월)~16(금) 과학축제주간\n"
+            "19(월)~23(금) 정보통신윤리교육주간\n19(월)~23(금) 인성실천 주간\n"
+            "7월\n7.21~8.18. 여름방학(29일)\n8월\n15(일) 광복절"
+        )
+        image_path = self.data_dir / "calendar.png"
+        image = QImage(80, 80, QImage.Format_RGB32)
+        image.fill(Qt.white)
+        self.assertTrue(image.save(str(image_path)))
+        with patch.object(self.window.ocr, "recognize", return_value=text) as recognize:
+            self.window.import_file_paths([str(image_path)])
+            self.wait_for_import()
+        recognize.assert_called_once()
+        dialog = self.preview()
+        self.assertEqual(7, dialog.table.rowCount())
+        self.assertEqual([], self.store.list_events())
+        self.assertEqual(text, self.window.text_input.toPlainText())
+        dates = {(dialog.table.item(row, dialog.DATE).text(), dialog.table.item(row, dialog.END_DATE).text())
+                 for row in range(dialog.table.rowCount())}
+        self.assertIn(("2021-07-21", "2021-08-18"), dates)
+        self.assertTrue(all(dialog.table.item(row, dialog.DATE).text().startswith("2021-")
+                            for row in range(dialog.table.rowCount())))
+        self.register()
+        events = self.store.list_events()
+        self.assertEqual(7, len(events))
+        self.assertEqual(2, sum(event.start_date == "2021-04-19" and event.end_date == "2021-04-23"
+                                for event in events))
+        self.assertFalse(any("수업일수" in event.title for event in events))
+        self.assertTrue(all(event.date_precision == "day" for event in events))
+        self.window.import_text()
+        self.assertEqual(7, self.preview().table.rowCount())
+        self.register()
+        self.assertEqual([event.id for event in events], [event.id for event in self.store.list_events()])
+        self.assertEqual([], self.errors)
+
+    def test_calendar_clipboard_image_keeps_month_and_original_text_for_review(self):
+        text = "주요 학사일정\n2021. 6월\n6(일) 현충일\n7(월)~11(금) 환경교육주간"
+        image = QImage(80, 80, QImage.Format_RGB32)
+        image.fill(Qt.white)
+        with patch.object(self.window.ocr, "recognize", return_value=text):
+            self.window.receive_import_payload({"kind": "image", "image": image}, "desktop")
+            self.wait_for_import()
+        dialog = self.preview()
+        self.assertEqual(2, dialog.table.rowCount())
+        self.assertEqual("2021-06-06", dialog.table.item(0, dialog.DATE).text())
+        self.assertEqual("2021-06-07", dialog.table.item(1, dialog.DATE).text())
+        self.assertEqual("2021-06-11", dialog.table.item(1, dialog.END_DATE).text())
+        self.assertEqual(text, dialog.recognized_editor.toPlainText())
+        self.assertIn(text, self.window.capture_notepad.editor.toPlainText())
+        dialog.reject()
+        self.app.processEvents()
+        self.assertEqual([], self.store.list_events())
+        self.assertIn(text, self.store.get_setting("capture_draft"))
+
     def test_reanalyzed_document_still_requires_confirmation_and_preserves_done_duplicates(self):
         document = self.document("duplicate-plan.txt", "2099년 9월 10일 국어 평가")
         self.window.import_file_paths([str(document)])

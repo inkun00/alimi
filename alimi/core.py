@@ -616,6 +616,157 @@ _MONTH_RANGE = re.compile(
 )
 _MONTH_LABEL = re.compile(r"^(?:시기|평가\s*시기|실시\s*시기|평가월|일정월|월|월별|일정|날짜|일자|기간)\s*[:：]?\s*")
 _MONTH_METADATA = re.compile(r"^(?:작성|발행|게시|등록|수정|출력|다운로드)\s*(?:일자|일시|일|월)?(?=\s|[:：]|$)\s*[:：]?")
+_CALENDAR_MONTH_HEADER = re.compile(
+    r"^[\[({]?\s*(?:(?P<year>19\d{2}|20\d{2})\s*(?:학년도|년|[./-])\s*)?"
+    r"(?P<month>1[0-2]|0?[1-9])\s*월\s*[.]?\s*[\])}]?$"
+)
+_CALENDAR_YEAR_HEADER = re.compile(r"^(19\d{2}|20\d{2})\s*(?:학년도|년|[.])?$")
+_CALENDAR_DATE = re.compile(
+    r"(?:(?P<year>19\d{2}|20\d{2})\s*(?:년|[./-])\s*)?"
+    r"(?P<month>\d{1,2})\s*(?:월|[./-])\s*(?P<day>\d{1,2})(?:\s*일)?(?!\d)"
+)
+_CALENDAR_DAY = re.compile(r"(?P<day>\d{1,2})(?:\s*일)?(?!\d)")
+_CALENDAR_WEEKDAY = re.compile(r"\s*\.?\s*[(\[]\s*([월화수목금토일])(?:요일)?\s*[)\]]")
+_CALENDAR_UNCLEAR_WEEKDAY = re.compile(r"\s*\.?\s*[(\[]\s*[^)\]\s]{0,3}\s*(?:[)\]]|(?=\s))")
+_CALENDAR_UNCLEAR_DAY = re.compile(r"\d[A-Za-z\d]{0,2}(?=\s*[(\[])")
+_CALENDAR_RANGE = re.compile(r"\s*\.?\s*(?:~|∼|–|—|-|부터)\s*")
+_CALENDAR_GRADE_RANGE = re.compile(r"^[\s•·*▪■●○▶#\-]*\d{1,2}\s*(?:~|∼|–|—|-|부터)\s*\d{1,2}\s*학년")
+
+
+def _calendar_date_token(text: str, position: int) -> tuple[int | None, int | None, int, str, int] | None:
+    """Read one leading calendar date, including an optional weekday.
+
+    A separate reader keeps pupil grades such as ``(4.6학년)`` and numbers in
+    event descriptions from becoming additional schedule candidates.
+    """
+    unclear_day = _CALENDAR_UNCLEAR_DAY.match(text, position)
+    if unclear_day and re.search(r"[A-Za-z]", unclear_day.group()):
+        weekday = _CALENDAR_WEEKDAY.match(text, unclear_day.end())
+        if weekday:
+            return None, None, 0, "숫자?", weekday.end()
+    match = _CALENDAR_DATE.match(text, position)
+    if match:
+        year = int(match["year"]) if match["year"] else None
+        month = int(match["month"])
+    else:
+        match = _CALENDAR_DAY.match(text, position)
+        year = month = None
+    if not match:
+        return None
+    end = match.end()
+    weekday = _CALENDAR_WEEKDAY.match(text, end)
+    if weekday:
+        return year, month, int(match["day"]), weekday.group(1), weekday.end()
+    unclear_weekday = _CALENDAR_UNCLEAR_WEEKDAY.match(text, end)
+    if unclear_weekday:
+        return year, month, int(match["day"]), "?", unclear_weekday.end()
+    # A digit immediately followed by prose is not a bare calendar day:
+    # ``5학년 진로체험`` names an audience, rather than the fifth of the month.
+    if end < len(text) and not re.match(r"[\s.~∼–—\-]", text[end]):
+        return None
+    return year, month, int(match["day"]), "", end
+
+
+def _calendar_entry_parts(line: str) -> tuple[tuple, tuple | None, str] | None:
+    if _CALENDAR_GRADE_RANGE.match(line):
+        return None
+    prefix = re.match(r"^[\s•·*▪■●○▶#\-]*", line).end()
+    first = _calendar_date_token(line, prefix)
+    if first is None:
+        return None
+    end = first[-1]
+    connector = _CALENDAR_RANGE.match(line, end)
+    second = _calendar_date_token(line, connector.end()) if connector else None
+    if second is not None:
+        end = second[-1]
+    body = line[end:].strip(" \t.·•:：~∼–—-,，")
+    # Calendar number grids, weekday rows and empty bullet placeholders are
+    # layout. A date needs a textual event description to establish a section.
+    if not re.search(r"[가-힣A-Za-z]", body) or not _looks_title(body):
+        return None
+    return first, second, body
+
+
+def _calendar_sections(lines: list[str], document_year: int | None) -> tuple[set[int], dict[int, tuple[int | None, int]]]:
+    """Identify month headings only when they introduce dated calendar entries.
+
+    A lone ``9월`` retains the existing month-reminder behavior. Calendar
+    headings instead provide context to their following day entries, without
+    adding a spurious first-of-month event for the heading itself.
+    """
+    headings = [(index, match) for index, line in enumerate(lines)
+                if (match := _CALENDAR_MONTH_HEADER.fullmatch(line))]
+    skip: set[int] = set()
+    contexts: dict[int, tuple[int | None, int]] = {}
+    current_year = document_year
+    previous_index = 0
+    for position, (index, heading) in enumerate(headings):
+        for line in lines[previous_index:index]:
+            year_header = _CALENDAR_YEAR_HEADER.fullmatch(line)
+            if year_header:
+                current_year = int(year_header.group(1))
+        if heading["year"]:
+            current_year = int(heading["year"])
+        end = headings[position + 1][0] if position + 1 < len(headings) else len(lines)
+        previous_index = index + 1
+        if not any(_calendar_entry_parts(line) for line in lines[index + 1:end]):
+            continue
+        skip.add(index)
+        for body_index in range(index + 1, end):
+            contexts[body_index] = current_year, int(heading["month"])
+    return skip, contexts
+
+
+def _calendar_event(line: str, parts: tuple[tuple, tuple | None, str], section_year: int | None,
+                    section_month: int, reference_year: int, source: str,
+                    preserve_date_words: bool) -> tuple[Event, str]:
+    first, second, body = parts
+    own_year, own_month, own_day, weekday, _ = first
+    year = own_year or section_year or reference_year
+    month = own_month or section_month
+    reasons: list[str] = []
+    if own_year is None and section_year is None:
+        reasons.append(f"연도가 없어 {year}년으로 표시했습니다. 원문의 연도를 확인해 주세요.")
+    try:
+        start = date(year, month, own_day)
+    except ValueError:
+        start = None
+        reasons.append("유효하지 않은 날짜입니다.")
+    if weekday == "숫자?":
+        reasons.append("날짜 숫자를 명확히 읽지 못했습니다. 원문을 확인해 주세요.")
+    elif weekday == "?":
+        reasons.append("요일 문자를 명확히 읽지 못했습니다. 원문을 확인해 주세요.")
+    elif weekday and start and _WEEKDAY[start.weekday()] != weekday:
+        reasons.append("날짜와 요일이 일치하지 않습니다.")
+    finish = None
+    if second is not None:
+        end_year, end_month, end_day, end_weekday, _ = second
+        # An explicitly written next month can cross December into January.
+        # A bare smaller day is ambiguous and is kept for review instead.
+        last_month = end_month or month
+        last_year = end_year or (year + (end_month is not None and last_month < month))
+        try:
+            finish = date(last_year, last_month, end_day)
+            if end_weekday in ("?", "숫자?"):
+                reasons.append("종료 날짜의 숫자나 요일을 명확히 읽지 못했습니다. 원문을 확인해 주세요.")
+            elif end_weekday and _WEEKDAY[finish.weekday()] != end_weekday:
+                reasons.append("종료 날짜와 요일이 일치하지 않습니다.")
+            if start and finish < start:
+                reasons.append("종료일이 시작일보다 빠릅니다.")
+                finish = None
+        except ValueError:
+            reasons.append("종료 날짜가 올바르지 않습니다.")
+    title_body = re.sub(r"\s+", " ", _PLACE.sub("", _TIME.sub("", body))).strip(" \t,，:：")
+    title = line if preserve_date_words else title_body
+    place_match = _PLACE.search(body)
+    header = f"{section_year}년 {section_month}월" if section_year is not None else f"{section_month}월"
+    event = Event(title=title, start_date=start.isoformat() if start else "",
+                  end_date=finish.isoformat() if finish else None, time=_extract_time(body),
+                  place=place_match.group(1).strip() if place_match else "",
+                  notes="확인 필요: " + " ".join(dict.fromkeys(reasons)) if reasons else "",
+                  source=source, source_text=header + "\n" + line,
+                  status="review" if reasons else "open")
+    return event, title_body
 
 
 def _date_matches(text: str) -> list[re.Match]:
@@ -794,7 +945,14 @@ def parse_schedule_text(text: str, source: str = "", reference_date: date | str 
     lines = [line.strip() for line in text.splitlines()]
     academic_year = re.search(r"(?<!\d)(19\d{2}|20\d{2})\s*학년도", text)
     document_year = academic_year or _YEAR.search(text) or _YEAR.search(source)
-    month_year = int(document_year.group(1)) if document_year else reference.year
+    calendar_year = next((int(match["year"]) for line in lines
+                          if (match := _CALENDAR_MONTH_HEADER.fullmatch(line)) and match["year"]), None)
+    if calendar_year is None:
+        calendar_year = next((int(match.group(1)) for line in lines
+                              if (match := _CALENDAR_YEAR_HEADER.fullmatch(line))), None)
+    explicit_year = int(document_year.group(1)) if document_year else calendar_year
+    month_year = explicit_year or reference.year
+    calendar_headers, calendar_contexts = _calendar_sections(lines, explicit_year)
     events: list[Event] = []
     seen: set[str] = set()
     assessment_columns: list[str] | None = None
@@ -802,6 +960,27 @@ def parse_schedule_text(text: str, source: str = "", reference_date: date | str 
     for index, line in enumerate(lines):
         if not line:
             continue
+        if index in calendar_headers:
+            continue
+        if index in calendar_contexts:
+            if _CALENDAR_GRADE_RANGE.match(line):
+                continue
+            parts = _calendar_entry_parts(line)
+            if parts is not None:
+                section_year, section_month = calendar_contexts[index]
+                event, identity_title = _calendar_event(line, parts, section_year, section_month,
+                                                        reference.year, source, _preserve_date_words)
+                identity_event = Event(**asdict(event))
+                identity_event.title = identity_title
+                fingerprint = _fingerprint(identity_event)
+                if fingerprint not in seen:
+                    events.append(event)
+                    seen.add(fingerprint)
+                continue
+            if re.match(r"^수업\s*일수\s*[:：]?", line) or not re.search(r"[가-힣A-Za-z]", line):
+                continue
+            if re.fullmatch(r"[\s|일월화수목금토\d.,/\-]+", line):
+                continue
         if "|" in line or "\t" in line:
             table_columns = [column.strip() for column in re.split(r"[|\t]", line)]
             normalized_columns = [_normal(column) for column in table_columns]

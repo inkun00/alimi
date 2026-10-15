@@ -158,6 +158,10 @@ class ImportReviewDialog(QDialog):
         count = self.table.rowCount()
         if count:
             self.summary_label.setText(f"일정 {count}건을 찾았습니다. 내용을 수정한 뒤 등록하세요. 선택한 일정만 저장됩니다.")
+            review_count = sum(event.status == "review" for event in self._events)
+            if review_count:
+                self.summary_label.setText(self.summary_label.text() +
+                    f" 확인 필요 {review_count}건: 해당 행을 선택해 날짜와 확인 사유를 살펴보세요.")
             if any(event.id is not None for event in self._events):
                 self.summary_label.setText(self.summary_label.text() +
                     " 이미 등록된 일정은 수정한 내용만 반영하며, 완료 상태는 유지합니다.")
@@ -242,6 +246,9 @@ class ImportReviewDialog(QDialog):
             status = "행을 선택하면 세부 내용이 표시됩니다."
         elif event.id is not None:
             status = ("기존 완료 일정 (수정해도 완료 상태 유지)" if event.status == "done" else "기존 일정 수정")
+        if event is not None and event.status == "review":
+            reason = event.notes if event.notes.startswith("확인 필요:") else "확인 필요: 원문의 날짜와 내용을 확인해 주세요."
+            status = "\n".join(part for part in (status, reason) if part)
         self.event_status_label.setText(status)
         self.event_status_label.setVisible(bool(status))
         self._loading_details = False

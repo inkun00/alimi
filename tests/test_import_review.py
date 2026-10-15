@@ -64,6 +64,21 @@ class ImportReviewTests(unittest.TestCase):
         event = window.selected_events()[0]
         self.assertEqual((self.event.source, self.event.source_text), (event.source, event.source_text))
 
+    def test_uncertain_calendar_dates_show_count_and_reason_without_opening_details_tab(self):
+        uncertain = replace(self.event, title="26(월)~30(목) 상담 주간", start_date="2021-04-26",
+                            end_date="2021-04-30", status="review",
+                            notes="확인 필요: 종료 날짜와 요일이 일치하지 않습니다.")
+        window = self.dialog([self.event, uncertain])
+        self.assertIn("확인 필요 1건", window.summary_label.text())
+        window.table.setCurrentCell(1, window.TITLE)
+        self.app.processEvents()
+        self.assertTrue(window.event_status_label.isVisible())
+        self.assertIn("종료 날짜와 요일이 일치하지 않습니다", window.event_status_label.text())
+        self.assertNotIn("출처:", window.event_status_label.text())
+        window.table.setCurrentCell(0, window.TITLE)
+        self.app.processEvents()
+        self.assertFalse(window.event_status_label.isVisible())
+
     def test_existing_event_hint_keeps_completion_status_without_source_metadata(self):
         window = self.dialog([replace(self.event, id=17, status="done")])
         self.assertTrue(window.event_status_label.isVisible())

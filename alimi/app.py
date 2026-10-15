@@ -528,7 +528,7 @@ class MainWindow(QMainWindow):
         self.analyze_button.setProperty("primary", True)
         self.analyze_button.clicked.connect(self.import_text)
         layout.addWidget(self.analyze_button)
-        support = QLabel("붙여넣거나 파일을 끌어 놓으면 확인 창을 엽니다. 내용을 수정한 뒤 ‘등록’을 눌러 저장하세요.\n지원: TXT · PDF · HWPX · HWP · DOCX · XLSX · PNG/JPG\n달만 적힌 일정은 ‘9월’처럼 월로 표시하고, 해당 월이 시작되면 알림을 띄웁니다.")
+        support = QLabel("붙여넣거나 파일을 끌어 놓으면 확인 창을 엽니다. 내용을 수정한 뒤 ‘등록’을 눌러 저장하세요.\n지원: TXT · PDF · HWPX · HWP · DOCX · XLSX · PNG/JPG\n월별 학사일정표는 연도·월 제목과 아래 날짜를 연결합니다. 작은 글자의 인식 오류는 등록 전에 확인하세요.\n달만 적힌 일정은 ‘9월’처럼 월로 표시하고, 설정한 표시 기간에 따라 알림을 띄웁니다.")
         support.setWordWrap(True)
         support.setProperty("muted", True)
         layout.addWidget(support)
@@ -2352,6 +2352,41 @@ def smoke_test(app, window, store, report_path: Path):
             store.get_event(history_edit.id).status == "open" and
             store.get_event(history_other.id).status == "done" and
             window.history_table.currentRow() == -1)
+        if window.args.smoke_calendar:
+            calendar_source = window.args.smoke_calendar.name
+            calendar_text = extract_file_text(window.args.smoke_calendar, window.ocr.recognize)
+            calendar_plan = parse_schedule_text(calendar_text, source=calendar_source)
+            report["checks"]["calendar_image_extracts_31_real_schedules"] = len(calendar_plan) == 31
+            report["checks"]["calendar_image_preserves_document_year_and_months"] = (
+                all(event.start_date.startswith("2021-") and event.date_precision == "day" for event in calendar_plan) and
+                [sum(event.start_date.startswith(f"2021-{month:02d}-") for event in calendar_plan)
+                 for month in range(3, 9)] == [9, 7, 5, 3, 4, 3])
+            report["checks"]["calendar_image_keeps_cross_month_vacation_as_one_range"] = sum(
+                event.start_date == "2021-07-21" and event.end_date == "2021-08-18" for event in calendar_plan) == 1
+            report["checks"]["calendar_image_keeps_distinct_events_in_same_period"] = sum(
+                event.start_date == "2021-04-19" and event.end_date == "2021-04-23" for event in calendar_plan) == 2
+            report["checks"]["calendar_image_omits_calendar_grid_and_school_day_totals"] = not any(
+                "수업일수" in event.title or event.date_precision == "month" for event in calendar_plan)
+            calendar_before = len(store.list_events())
+            window.receive_import_text(calendar_text, calendar_source)
+            app.processEvents()
+            calendar_dialog = window.import_dialog
+            report["checks"]["calendar_image_waits_for_review_before_registration"] = (
+                calendar_dialog is not None and calendar_dialog.table.rowCount() == 31 and
+                len(store.list_events()) == calendar_before)
+            calendar_dialog.grab().save(str(report_path.with_name(report_path.stem + "-calendar-review.png")))
+            calendar_dialog.register_button.click()
+            app.processEvents()
+            registered_calendar = [event for event in store.list_events() if event.source == calendar_source]
+            report["checks"]["calendar_image_registers_exactly_reviewed_schedules"] = (
+                len(registered_calendar) == 31 and len(store.list_events()) == calendar_before + 31)
+            window.receive_import_text(calendar_text, calendar_source)
+            app.processEvents()
+            window.import_dialog.register_button.click()
+            app.processEvents()
+            report["checks"]["calendar_image_reanalysis_does_not_duplicate"] = (
+                len([event for event in store.list_events() if event.source == calendar_source]) == 31 and
+                len(store.list_events()) == calendar_before + 31)
         from contextlib import closing
         from dataclasses import asdict
         def persistent_events(repository):
@@ -2449,6 +2484,7 @@ def main():
     parser.add_argument("--data-dir", type=Path)
     parser.add_argument("--smoke-test", type=Path)
     parser.add_argument("--smoke-document", type=Path)
+    parser.add_argument("--smoke-calendar", type=Path)
     args = parser.parse_args()
     frozen_install()
     args.data_dir = args.data_dir or default_data_dir()

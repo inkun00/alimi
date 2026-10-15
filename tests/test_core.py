@@ -784,6 +784,187 @@ class StoreTests(unittest.TestCase):
         self.assertEqual("유지할 일정", self.store.list_events()[0].title)
 
 
+class CalendarSectionParserTests(unittest.TestCase):
+    def test_semester_calendar_keeps_all_31_entries_in_their_2021_months(self):
+        text = """주요 학사일정
+2021. 3월
+일 월 화 수 목 금 토
+1 2 3 4 5 6
+7 8 9 10 11 12 13
+1(월) 삼일절
+2(화) 시업식·입학식
+2(화)~5(금) 평화학급 세우기
+8(월)~19(금) 진단활동 주간
+9(화) 학급 임원선거(3, 5학년)
+11(목) 학급 임원선거(4, 6학년)
+15(월) 진로적성검사(3, 5학년)
+18(목) 진로적성검사(4, 6학년)
+17(수) 학부모총회
+수업일수: 22일
+4월
+12(월)~16일(금) 과학축제주간
+19(월)~23(금) 정보통신윤리교육주간
+19(월)~23(금) 인성실천 주간
+20(화) 장애인권행사
+23(금) 책의 날 행사
+26(월)~30(목) 학부모상담주간
+26(월)~30(목) 5~6학년 PAPS 측정 주간
+수업일수: 22일
+5월
+3(월)~4(화) 재량휴업일
+5(수) 어린이 날
+6(목) 개교기념일
+19(수) 부처님 오신 날
+26(수) 민방위훈련(예정)
+수업일수: 17일
+6월
+6(일) 현충일
+7(월)~11일(금) 환경교육주간
+23(수) 합동소방훈련(예정)
+7월
+5(월)~9(금) 5학년 진로체험주간
+7(수) 교육과정 협의회
+20(화) 여름방학식
+7.21~8.18. 여름방학(29일)
+8월
+15(일) 광복절
+19(목) 2학기 개학식
+24(화) 2학기 학급임원선거
+수업일수: 9일"""
+        events = parse_schedule_text(text, reference_date="2026-10-15")
+        self.assertEqual(31, len(events))
+        self.assertEqual([9, 7, 5, 3, 4, 3],
+                         [sum(event.start_date.startswith(f"2021-{month:02}-") for event in events)
+                          for month in range(3, 9)])
+        self.assertTrue(all(event.date_precision == "day" for event in events))
+        self.assertEqual(["2021-04-26", "2021-04-26"],
+                         [event.start_date for event in events if event.status == "review"])
+        holiday = next(event for event in events if "여름방학(29일)" in event.title)
+        self.assertEqual(("2021-07-21", "2021-08-18", "open"),
+                         (holiday.start_date, holiday.end_date, holiday.status))
+
+    def test_month_headers_are_context_while_month_reminders_still_work(self):
+        events = parse_schedule_text("2021년\n3월\n1(월) 삼일절\n4월\n20(화) 장애인권행사",
+                                     reference_date="2026-10-15")
+        self.assertEqual([("2021-03-01", "open"), ("2021-04-20", "open")],
+                         [(event.start_date, event.status) for event in events])
+        self.assertTrue(all(event.date_precision == "day" for event in events))
+        plain = parse_schedule_text("9월 국어 평가", reference_date="2026-10-15")
+        self.assertEqual(("2026-09-01", "month", "open"),
+                         (plain[0].start_date, plain[0].date_precision, plain[0].status))
+
+    def test_grids_weekdays_and_school_day_totals_do_not_become_events(self):
+        for prefix in ("•", "#"):
+            with self.subTest(prefix=prefix):
+                text = f"2021. 3월\n일 월 화 수 목 금 토\n1 2 3 4 5 6\n7 | 8 | 9 | 10 | 11 | 12 | 13\n{prefix}1(월) 삼일절\n수업 일수: 22일\n•\n:"
+                events = parse_schedule_text(text, reference_date="2026-10-15")
+                self.assertEqual([("2021-03-01", f"{prefix}1(월) 삼일절")],
+                                 [(event.start_date, event.title) for event in events])
+
+    def test_source_year_and_academic_year_are_available_to_calendar_sections(self):
+        for text, source in (("3월\n1(월) 삼일절", "2021년 학사일정.png"),
+                             ("2021학년도 주요 학사일정\n3월\n1(월) 삼일절", "")):
+            with self.subTest(text=text, source=source):
+                event = parse_schedule_text(text, source=source, reference_date="2026-10-15")[0]
+                self.assertEqual(("2021-03-01", "open"), (event.start_date, event.status))
+
+    def test_yearless_calendar_is_kept_for_review(self):
+        event = parse_schedule_text("3월\n1(일) 삼일절", reference_date="2026-10-15")[0]
+        self.assertEqual(("2026-03-01", "review"), (event.start_date, event.status))
+        self.assertIn("연도가 없어", event.notes)
+        self.assertEqual("3월\n1(일) 삼일절", event.source_text)
+
+    def test_same_period_distinct_titles_are_not_merged(self):
+        events = parse_schedule_text("2021년 4월\n19(월)~23(금) 정보통신윤리교육주간\n19(월)~23(금) 인성실천 주간")
+        self.assertEqual(2, len(events))
+        self.assertTrue(all((event.start_date, event.end_date) == ("2021-04-19", "2021-04-23")
+                            for event in events))
+        self.assertNotEqual(events[0].title, events[1].title)
+
+    def test_grade_numbers_and_dates_in_event_body_are_not_extra_schedules(self):
+        lines = ["18(목) 진로적성검사(4.6학년)", "26(월)~30(금) 5-6학년 PAPS 측정 주간",
+                 "19(월)~23(금) 4.20 안내문으로 교육하기"]
+        events = parse_schedule_text("2021년 3월\n" + lines[0] + "\n4월\n" + "\n".join(lines[1:]))
+        self.assertEqual(lines, [event.title for event in events])
+        self.assertEqual(["2021-03-18", "2021-04-26", "2021-04-19"],
+                         [event.start_date for event in events])
+
+    def test_both_range_weekdays_are_checked_without_changing_source_numbers(self):
+        event = parse_schedule_text("2021년 4월\n26(월)~30(목) 학부모상담주간")[0]
+        self.assertEqual(("2021-04-26", "2021-04-30", "review"),
+                         (event.start_date, event.end_date, event.status))
+        self.assertIn("종료 날짜와 요일", event.notes)
+        self.assertIn("30(목)", event.title)
+
+    def test_malformed_ocr_weekday_retains_dates_and_requires_review(self):
+        for line, start, end in (("19()~23(금) 인성실천 주간", "2021-04-19", "2021-04-23"),
+                                 ("26(월)~30(옥 학부모상담주간", "2021-04-26", "2021-04-30"),
+                                 ("26()~30(옥 5-6학년 PAPS 측정 주간", "2021-04-26", "2021-04-30")):
+            with self.subTest(line=line):
+                events = parse_schedule_text("2021년 4월\n" + line)
+                self.assertEqual(1, len(events))
+                self.assertEqual((start, end, "review"),
+                                 (events[0].start_date, events[0].end_date, events[0].status))
+                self.assertEqual(line, events[0].title)
+                self.assertIn("명확히 읽지 못했습니다", events[0].notes)
+
+    def test_ambiguous_day_digit_is_preserved_as_undated_review_without_guessing(self):
+        event = parse_schedule_text("2021년 8월\n1S(일) 광복절")[0]
+        self.assertEqual(("", "review", "1S(일) 광복절"), (event.start_date, event.status, event.title))
+        self.assertIn("날짜 숫자를 명확히", event.notes)
+
+    def test_calendar_invalid_dates_and_reversed_ranges_need_review(self):
+        for line in ("30(화) 잘못된 날짜", "28(일)~31(수) 잘못된 종료일", "28(일)~2(화) 월이 불명확한 기간"):
+            with self.subTest(line=line):
+                events = parse_schedule_text("2021년 2월\n" + line)
+                self.assertEqual(1, len(events))
+                self.assertEqual("review", events[0].status)
+                self.assertIn(line, events[0].source_text)
+
+    def test_explicit_date_overrides_month_context_and_preserves_full_time_range(self):
+        event = parse_schedule_text("2021년 3월\n2022년 10월 22일(토) 교직원 회의 15:00-19:00")[0]
+        self.assertEqual(("2022-10-22", "15:00", "open"), (event.start_date, event.time, event.status))
+        self.assertIn("15:00-19:00", event.title)
+
+    def test_explicit_month_range_can_cross_month_and_year(self):
+        for expression in ("12.30~1.3", "12월 30일~2022년 1월 3일"):
+            with self.subTest(expression=expression):
+                event = parse_schedule_text("2021년 12월\n" + expression + " 겨울방학")[0]
+                self.assertEqual(("2021-12-30", "2022-01-03", "open"),
+                                 (event.start_date, event.end_date, event.status))
+
+    def test_bare_day_and_day_suffix_are_supported_but_pupil_grade_is_not_a_date(self):
+        events = parse_schedule_text("2021년 3월\n1 삼일절\n2일 시업식·입학식\n5학년 진로체험 안내")
+        self.assertEqual(["2021-03-01", "2021-03-02"], [event.start_date for event in events])
+
+    def test_calendar_repeated_entries_deduplicate_without_merging_titles(self):
+        events = parse_schedule_text("2021년 3월\n1(월) 삼일절\n1(월) 삼일절\n1(월) 학급 안내")
+        self.assertEqual(2, len(events))
+        self.assertNotEqual(events[0].title, events[1].title)
+
+    def test_grade_audience_range_does_not_reclassify_a_month_reminder(self):
+        for separator in ("~", "∼", "–", "—", "부터"):
+            with self.subTest(separator=separator):
+                events = parse_schedule_text(f"5월\n3{separator}5학년 체험활동", reference_date="2026-10-15")
+                self.assertEqual(1, len(events))
+                self.assertEqual(("2026-05-01", "month", "open"),
+                                 (events[0].start_date, events[0].date_precision, events[0].status))
+                self.assertIn("체험활동", events[0].notes)
+
+    def test_grade_audience_ranges_inside_calendar_do_not_add_dates(self):
+        text = "2021. 5월\n3(월)~5(수) 진로 주간\n3~5학년 체험활동\n•3-5 학년 참여 안내\n6(목) 개교기념일"
+        events = parse_schedule_text(text)
+        self.assertEqual([("2021-05-03", "2021-05-05"), ("2021-05-06", None)],
+                         [(event.start_date, event.end_date) for event in events])
+        self.assertTrue(all(event.status == "open" for event in events))
+
+    def test_calendar_month_heading_accepts_trailing_period_from_ocr(self):
+        events = parse_schedule_text("2021. 3월.\n1(월) 삼일절\n4월.\n20(화) 장애인권행사",
+                                     reference_date="2026-10-15")
+        self.assertEqual([("2021-03-01", "open"), ("2021-04-20", "open")],
+                         [(event.start_date, event.status) for event in events])
+
+
 class ParserTests(unittest.TestCase):
     def test_month_precision_formats_only_the_supplied_month(self):
         event = parse_schedule_text("9월 과학 평가", reference_date="2026-01-01")[0]
