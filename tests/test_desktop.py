@@ -377,7 +377,23 @@ class DesktopReminderTests(unittest.TestCase):
         text = event_details(replace(self.event, date_precision="day", end_date=None, time="15:30"))
         self.assertIn("2026-09-01 · 15:30", text)
         self.assertIn("과학실", text)
-        self.assertIn("평가 계획.pdf", text)
+        self.assertNotIn("평가 계획.pdf", text)
+        self.assertNotIn("출처:", text)
+
+    def test_reminder_details_and_list_tooltips_omit_source_metadata(self):
+        event = replace(self.event, source="일정 메모장", source_text="분석에 사용한 원문")
+        note = self.show(NoteWindow(event))
+        note.toggle_details()
+        desktop_list = self.show(DesktopListWindow([event]))
+        desktop_list.set_selected_event(event.id)
+        for text in (note.details_label.text(), desktop_list.details_label.text(),
+                     desktop_list.list_widget.item(0).toolTip()):
+            self.assertNotIn("출처:", text)
+            self.assertNotIn(event.source, text)
+            self.assertIn(event.title, text)
+        self.assertIn(event.notes, note.details_label.text())
+        self.assertEqual("일정 메모장", event.source)
+        self.assertEqual("분석에 사용한 원문", event.source_text)
 
 
 if __name__ == "__main__":

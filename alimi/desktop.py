@@ -132,7 +132,6 @@ def event_details(event: Event) -> str:
         event.title, timing,
         "장소: " + event.place if event.place else "",
         event.notes,
-        "출처: " + event.source if event.source else "",
     ) if part)
 
 

@@ -12,7 +12,7 @@ import onnxruntime
 onnxruntime.disable_telemetry_events()
 
 from PyQt5.QtCore import QEvent, Qt
-from PyQt5.QtWidgets import QApplication, QDialog, QTabWidget
+from PyQt5.QtWidgets import QApplication, QDialog, QLabel, QTabWidget
 
 from alimi.core import Event
 from alimi.review import ImportReviewDialog
@@ -54,6 +54,24 @@ class ImportReviewTests(unittest.TestCase):
         self.assertEqual(Qt.NonModal, window.windowModality())
         self.assertEqual("원래 공지 원문", window.source_text.toPlainText())
         self.assertTrue(window.source_text.isReadOnly())
+
+    def test_source_metadata_is_hidden_while_original_text_is_preserved(self):
+        window = self.dialog()
+        labels = [label.text() for label in window.findChildren(QLabel)]
+        self.assertFalse(any("출처:" in text or self.event.source in text for text in labels))
+        self.assertFalse(window.event_status_label.isVisible())
+        self.assertEqual(self.event.source_text, window.source_text.toPlainText())
+        event = window.selected_events()[0]
+        self.assertEqual((self.event.source, self.event.source_text), (event.source, event.source_text))
+
+    def test_existing_event_hint_keeps_completion_status_without_source_metadata(self):
+        window = self.dialog([replace(self.event, id=17, status="done")])
+        self.assertTrue(window.event_status_label.isVisible())
+        self.assertEqual("기존 완료 일정 (수정해도 완료 상태 유지)", window.event_status_label.text())
+        window.append_candidates([replace(self.event, id=18, status="open")])
+        window.table.setCurrentCell(1, window.TITLE)
+        self.assertEqual("기존 일정 수정", window.event_status_label.text())
+        self.assertNotIn(self.event.source, window.event_status_label.text())
 
     def test_full_recognized_text_is_the_default_editable_tab(self):
         full_text = "가정통신문\n인식한 안내 문구입니다.\n2026년 10월 13일 교직원 회의\n회신은 담당자에게 전달하세요."

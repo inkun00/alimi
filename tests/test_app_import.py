@@ -18,7 +18,7 @@ import onnxruntime
 
 onnxruntime.disable_telemetry_events()
 
-from PyQt5.QtCore import QEvent, QMimeData, Qt, QUrl
+from PyQt5.QtCore import QDate, QEvent, QMimeData, Qt, QUrl
 from PyQt5.QtGui import QImage
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication, QDialog, QMessageBox
@@ -142,6 +142,62 @@ class FileImportUiTests(unittest.TestCase):
         self.assertEqual(1, len(self.store.list_events()))
         self.assertEqual(original, self.store.get_event(event.id).title)
         self.assertEqual([], self.errors)
+
+    def test_time_range_notice_is_one_confirmed_schedule_through_notepad_and_modes(self):
+        original = "-부스 사전설치:2026.10.22.(목),15:00-19:00"
+        notepad = self.open_notepad()
+        notepad.editor.setPlainText(original)
+        notepad.review_button.click()
+        dialog = self.preview()
+        self.assertEqual(1, dialog.table.rowCount())
+        self.assertEqual(original, dialog.table.item(0, dialog.TITLE).text())
+        self.assertEqual("2026-10-22", dialog.table.item(0, dialog.DATE).text())
+        self.assertEqual("15:00", dialog.table.item(0, dialog.TIME).text())
+        self.assertEqual([], self.store.list_events())
+        self.register()
+        event, = self.store.list_events()
+        self.assertEqual((original, "2026-10-22", "15:00", "open"),
+                         (event.title, event.start_date, event.time, event.status))
+        self.assertEqual(original, event.source_text)
+        self.assertEqual("일정 메모장", event.source)
+        self.assertIn("15:00-19:00", self.window.notes[event.id].details_label.text())
+        self.assertNotIn("출처:", self.window.notes[event.id].details_label.text())
+        self.window.mode_combo.setCurrentIndex(1)
+        self.app.processEvents()
+        listing = self.window.desktop_list
+        self.assertEqual(1, listing.list_widget.count())
+        self.assertEqual(original, listing.list_widget.item(0).text())
+        notepad.review_button.click()
+        self.assertEqual(1, self.preview().table.rowCount())
+        self.register()
+        self.assertEqual([event.id], [saved.id for saved in self.store.list_events()])
+        self.assertEqual([], self.errors)
+
+    def test_calendar_and_record_tables_hide_source_but_keep_place_and_saved_origin(self):
+        origin = "내부 출처 검사 전용.pdf"
+        records = [self.store.upsert_event(Event(
+            title=f"출처 숨김 {status}", start_date=date.today().isoformat(),
+            source=origin, source_text="보존할 일정 원문", status=status,
+            place="회의실" if status == "open" else ""))
+            for status in ("open", "review", "done")]
+        self.window.calendar.setSelectedDate(QDate.currentDate())
+        self.window.refresh()
+        visible_agenda = "\n".join(self.window.agenda.item(row).text()
+                                   for row in range(self.window.agenda.count()))
+        self.assertNotIn(origin, visible_agenda)
+        self.assertIn("회의실", visible_agenda)
+        for table in (self.window.review_table, self.window.history_table):
+            headers = [table.horizontalHeaderItem(column).text() for column in range(table.columnCount())]
+            self.assertEqual(["제목", "날짜", "시간"], headers)
+            self.assertFalse(any(origin in table.item(row, column).text()
+                                 for row in range(table.rowCount()) for column in range(table.columnCount())))
+        self.assertTrue(all(self.store.get_event(event.id).source == origin for event in records))
+        self.assertTrue(all(self.store.get_event(event.id).source_text == "보존할 일정 원문" for event in records))
+        self.window.queue_import_review([Event(title="새 일정", start_date=date.today().isoformat(), source=origin)],
+                                        origin, "원문")
+        self.assertNotIn(origin, self.window.status_label.text())
+        self.register()
+        self.assertNotIn(origin, self.window.status_label.text())
 
     def test_file_button_previews_then_saves_edited_monthly_events(self):
         original = "2099학년도 평가 계획\n9월 국어 독서 평가\n10월 수학 연산 평가"

@@ -185,6 +185,34 @@ class DesktopModeIntegrationTests(unittest.TestCase):
         self.assertNotIn("원래 메모", note.details_label.text())
         self.assertEqual([], self.errors)
 
+    def test_manager_omits_source_metadata_but_keeps_places_status_and_saved_provenance(self):
+        today = date.today().isoformat()
+        events = [self.store.upsert_event(Event(
+            title=f"출처 숨김 {status}", start_date=today, status=status,
+            place="과학실" if status == "open" else "", notes="일정 세부 안내",
+            source="내부 자료 이름.pdf", source_text="가져온 일정 원문"))
+            for status in ("open", "done", "review")]
+        self.window.calendar.setSelectedDate(QDate.fromString(today, "yyyy-MM-dd"))
+        self.window.refresh()
+        self.assertEqual(3, self.window.agenda.count())
+        agenda = "\n".join(self.window.agenda.item(row).text() for row in range(self.window.agenda.count()))
+        self.assertIn("과학실", agenda)
+        self.assertIn("미완료", agenda)
+        self.assertIn("완료", agenda)
+        self.assertIn("확인 필요", agenda)
+        self.assertNotIn("내부 자료 이름.pdf", agenda)
+        for table in (self.window.review_table, self.window.history_table):
+            self.assertEqual(3, table.columnCount())
+            self.assertEqual(["제목", "날짜", "시간"],
+                             [table.horizontalHeaderItem(column).text() for column in range(table.columnCount())])
+            self.assertEqual(1, table.rowCount())
+            self.assertFalse(any("내부 자료 이름.pdf" in table.item(0, column).text()
+                                 for column in range(table.columnCount())))
+        for original in events:
+            saved = self.store.get_event(original.id)
+            self.assertEqual((original.source, original.source_text), (saved.source, saved.source_text))
+        self.assertEqual([], self.errors)
+
     def test_edit_event_moves_calendar_and_selects_the_saved_schedule(self):
         event = self.store.upsert_event(Event(title="날짜를 옮길 일정", start_date="2026-10-14", time="10:00"))
         self.store.upsert_event(Event(title="옮길 날짜의 다른 일정", start_date="2026-10-15", time="09:00"))

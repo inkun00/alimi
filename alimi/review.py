@@ -79,9 +79,9 @@ class ImportReviewDialog(QDialog):
         details = QWidget()
         details_layout = QVBoxLayout(details)
         details_layout.setContentsMargins(0, 0, 0, 0)
-        self.source_label = QLabel()
-        self.source_label.setWordWrap(True)
-        details_layout.addWidget(self.source_label)
+        self.event_status_label = QLabel()
+        self.event_status_label.setWordWrap(True)
+        details_layout.addWidget(self.event_status_label)
         tabs = QTabWidget()
         recognized_page = QWidget()
         recognized_layout = QVBoxLayout(recognized_page)
@@ -237,10 +237,13 @@ class ImportReviewDialog(QDialog):
         self.notes_editor.setEnabled(event is not None)
         self.notes_editor.setPlainText(event.notes if event else "")
         self.source_text.setPlainText(event.source_text if event else "")
-        self.source_label.setText(f"출처: {event.source or '입력한 텍스트'}" if event else "행을 선택하면 세부 내용이 표시됩니다.")
-        if event and event.id is not None:
-            self.source_label.setText(self.source_label.text() +
-                (" · 기존 완료 일정 (수정해도 완료 상태 유지)" if event.status == "done" else " · 기존 일정 수정"))
+        status = ""
+        if event is None:
+            status = "행을 선택하면 세부 내용이 표시됩니다."
+        elif event.id is not None:
+            status = ("기존 완료 일정 (수정해도 완료 상태 유지)" if event.status == "done" else "기존 일정 수정")
+        self.event_status_label.setText(status)
+        self.event_status_label.setVisible(bool(status))
         self._loading_details = False
 
     def _item_changed(self, _item: QTableWidgetItem) -> None:

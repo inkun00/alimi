@@ -925,6 +925,81 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(1, len(events))
         self.assertEqual(("2026-10-13", "2026-10-15"), (events[0].start_date, events[0].end_date))
 
+    def test_booth_setup_date_and_clock_range_are_one_complete_schedule(self):
+        text = "-부스 사전설치:2026.10.22.(목),15:00-19:00"
+        events = parse_schedule_text(text, reference_date="2026-10-15")
+        self.assertEqual(1, len(events))
+        event = events[0]
+        self.assertEqual((text, "2026-10-22", None, "15:00", "open"),
+                         (event.title, event.start_date, event.end_date, event.time, event.status))
+        self.assertEqual(text, event.source_text)
+
+    def test_clock_range_separators_and_ocr_spaces_do_not_create_dates(self):
+        for clock in ("09:10-11:30", "09:10 - 11:30", "09 : 10 - 11 : 30",
+                      "０９：１０－１１：３０", "09:10~11:30", "09:10–11:30"):
+            with self.subTest(clock=clock):
+                text = f"2026.10.22.(목) 교직원 회의 {clock}"
+                events = parse_schedule_text(text, reference_date="2026-10-15")
+                self.assertEqual(1, len(events))
+                self.assertEqual(("2026-10-22", "09:10", "open"),
+                                 (events[0].start_date, events[0].time, events[0].status))
+
+    def test_clock_range_without_date_does_not_invent_a_schedule(self):
+        for text in ("부스 사전설치 15:00-19:00", "시간: 09:10-11:30", "운영 시간: 09 : 10 - 11 : 30"):
+            with self.subTest(text=text):
+                self.assertEqual([], parse_schedule_text(text, reference_date="2026-10-15"))
+
+    def test_clock_range_on_following_time_line_keeps_heading_and_place(self):
+        text = "부스 사전설치\n일자:2026.10.22.(목)\n시간:15:00-19:00\n장소:운동장"
+        events = parse_schedule_text(text, reference_date="2026-10-15")
+        self.assertEqual(1, len(events))
+        self.assertEqual(("부스 사전설치", "2026-10-22", "15:00", "운동장", "open"),
+                         (events[0].title, events[0].start_date, events[0].time, events[0].place, events[0].status))
+        self.assertEqual(text.split("\n", 1)[1], events[0].source_text)
+
+    def test_clock_ranges_in_table_keep_distinct_schedules(self):
+        text = ("일정명 | 일시 | 장소\n"
+                "부스 설치 | 2026.10.22.(목),15:00-19:00 | 운동장\n"
+                "부스 운영 | 2026.10.23.(금),09:10-11:30 | 강당")
+        events = parse_schedule_text(text, reference_date="2026-10-15")
+        self.assertEqual([("부스 설치", "2026-10-22", "15:00", "운동장"),
+                          ("부스 운영", "2026-10-23", "09:10", "강당")],
+                         [(event.title, event.start_date, event.time, event.place) for event in events])
+
+    def test_separate_inline_schedules_with_clock_ranges_remain_separate(self):
+        lines = ["부스 설치:2026.10.22.(목),15:00-19:00", "부스 운영:2026.10.23.(금),09:10-11:30"]
+        events = parse_schedule_text("\n".join(lines), reference_date="2026-10-15")
+        self.assertEqual(lines, [event.title for event in events])
+        self.assertEqual([("2026-10-22", "15:00"), ("2026-10-23", "09:10")],
+                         [(event.start_date, event.time) for event in events])
+
+    def test_clock_range_preserves_yearless_relative_and_month_uncertainty(self):
+        for text, expected_date, precision in (("부스 설치 일자:10.22.(목),15:00-19:00", "2026-10-22", "day"),
+                                                ("다음 주 목요일 부스 설치 15:00-19:00", "", "day"),
+                                                ("10월 부스 운영 09:10-11:30", "2026-10-01", "month")):
+            with self.subTest(text=text):
+                events = parse_schedule_text(text, reference_date="2026-10-15")
+                self.assertEqual(1, len(events))
+                self.assertEqual((text, expected_date, precision),
+                                 (events[0].title, events[0].start_date, events[0].date_precision))
+                self.assertEqual("open" if precision == "month" else "review", events[0].status)
+
+    def test_dotted_weekday_date_range_with_clock_range_is_one_schedule(self):
+        for connector in ("-", "~", "부터"):
+            with self.subTest(connector=connector):
+                text = f"부스 운영:2026.10.22.(목){connector}2026.10.23.(금),09:10-11:30"
+                events = parse_schedule_text(text, reference_date="2026-10-15")
+                self.assertEqual(1, len(events))
+                self.assertEqual((text, "2026-10-22", "2026-10-23", "09:10", "open"),
+                                 (events[0].title, events[0].start_date, events[0].end_date, events[0].time, events[0].status))
+
+    def test_dotted_date_with_wrong_weekday_still_requires_review(self):
+        events = parse_schedule_text("부스 설치:2026.10.22.(금),15:00-19:00", reference_date="2026-10-15")
+        self.assertEqual(1, len(events))
+        self.assertEqual(("2026-10-22", "15:00", "review"),
+                         (events[0].start_date, events[0].time, events[0].status))
+        self.assertIn("요일", events[0].notes)
+
     def test_relative_date_is_not_invented(self):
         event = parse_schedule_text("다음 주 금요일 학급 비상 연락망 제출", reference_date=date(2026, 10, 13))[0]
         self.assertEqual("", event.start_date)

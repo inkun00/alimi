@@ -542,8 +542,8 @@ class MainWindow(QMainWindow):
         label = QLabel(hint)
         label.setWordWrap(True)
         layout.addWidget(label)
-        table = QTableWidget(0, 4)
-        table.setHorizontalHeaderLabels(["제목", "날짜", "시간", "출처"])
+        table = QTableWidget(0, 3)
+        table.setHorizontalHeaderLabels(["제목", "날짜", "시간"])
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         table.horizontalHeader().setStretchLastSection(True)
@@ -937,7 +937,7 @@ class MainWindow(QMainWindow):
             selected = [event for event in events if event.status == status]
             table.setRowCount(len(selected))
             for row, event in enumerate(selected):
-                for col, value in enumerate((event.title, format_event_date(event, include_year=True), event.time or "", event.source or "")):
+                for col, value in enumerate((event.title, format_event_date(event, include_year=True), event.time or "")):
                     item = QTableWidgetItem(value)
                     item.setData(Qt.UserRole, event.id)
                     table.setItem(row, col, item)
@@ -982,7 +982,8 @@ class MainWindow(QMainWindow):
                      "미완료 · 바탕화면 도구 닫힘" if tool_closed else
                      "미완료 · 바탕화면 알림 표시 중")
             timing = format_event_date(event) if event.date_precision == "month" else (event.time or '종일')
-            item = QListWidgetItem(f"{timing}  {event.title}\n{event.place or event.source}  ·  {state}")
+            detail = f"{event.place} · {state}" if event.place else state
+            item = QListWidgetItem(f"{timing}  {event.title}\n{detail}")
             item.setData(Qt.UserRole, event.id)
             self.agenda.addItem(item)
             if event.id == previous_id:
@@ -1378,7 +1379,7 @@ class MainWindow(QMainWindow):
             return
         summary = f"분석한 일정 {len(candidates)}건 · 아직 등록되지 않았습니다."
         self.import_result.setPlainText(summary + "\n\n" + text[:18000])
-        self.status_label.setText(source + ": " + summary)
+        self.status_label.setText(summary)
         self.capture_notepad.status_label.setText("확인 창에서 내용을 수정한 뒤 ‘등록’을 눌러 주세요.")
         self.import_queue.append((candidates, source, text, errors or []))
         self.show_next_import_review()
@@ -1456,7 +1457,7 @@ class MainWindow(QMainWindow):
         if completed:
             message += f" 완료된 기존 일정 {completed}건은 완료 상태를 유지합니다. 다시 표시하려면 완료 기록에서 완료 취소하세요."
         self.import_result.setPlainText(summary + "\n" + message + "\n\n" + text[:18000])
-        self.status_label.setText(source + ": " + message)
+        self.status_label.setText(message)
         self.capture_notepad.status_label.setText(message)
 
     def fill_sample(self):
@@ -1881,6 +1882,38 @@ def smoke_test(app, window, store, report_path: Path):
             deadline_event.start_date == f"{date.today().year}-10-30" and
             window.notes[int(deadline_event.id)].title_label.full_title == original_deadline and
             original_deadline in deadline_event.source_text)
+        timed_notice = "-부스 사전설치:2026.10.22.(목),15:00-19:00"
+        window.receive_import_text(timed_notice, "일정 메모장")
+        app.processEvents()
+        timed_dialog = window.import_dialog
+        report["checks"]["time_range_notice_previews_as_one_complete_schedule"] = (
+            timed_dialog.table.rowCount() == 1 and
+            timed_dialog.table.item(0, timed_dialog.TITLE).text() == timed_notice and
+            timed_dialog.table.item(0, timed_dialog.DATE).text() == "2026-10-22" and
+            timed_dialog.table.item(0, timed_dialog.TIME).text() == "15:00")
+        report["checks"]["review_omits_source_label"] = not any(
+            label.text().startswith("출처:") for label in timed_dialog.findChildren(QLabel))
+        timed_dialog.register_button.click()
+        app.processEvents()
+        timed_event = next(event for event in store.list_events() if event.source_text == timed_notice)
+        report["checks"]["time_range_notice_saves_one_open_event_and_preserves_original"] = (
+            sum(event.source_text == timed_notice for event in store.list_events()) == 1 and
+            (timed_event.title, timed_event.start_date, timed_event.time, timed_event.status) ==
+            (timed_notice, "2026-10-22", "15:00", "open"))
+        report["checks"]["sticky_details_omit_source_and_keep_time_range"] = (
+            timed_event.source == "일정 메모장" and
+            "출처:" not in window.notes[timed_event.id].details_label.text() and
+            "15:00-19:00" in window.notes[timed_event.id].details_label.text())
+        window.receive_import_text(timed_notice, "일정 메모장")
+        app.processEvents()
+        window.import_dialog.register_button.click()
+        app.processEvents()
+        report["checks"]["repeated_time_range_notice_does_not_duplicate"] = (
+            sum(event.source_text == timed_notice for event in store.list_events()) == 1)
+        report["checks"]["record_tables_omit_source_column"] = all(
+            table.columnCount() == 3 and
+            [table.horizontalHeaderItem(column).text() for column in range(table.columnCount())] ==
+            ["제목", "날짜", "시간"] for table in (window.review_table, window.history_table))
         future_date = (date.today() + timedelta(days=2)).isoformat()
         future = store.upsert_event(Event(title="미래 일정 검증", start_date=future_date, status="open"))
         review = store.upsert_event(Event(title="확인 필요 일정 검증", start_date=date.today().isoformat(),

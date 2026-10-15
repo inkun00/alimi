@@ -600,7 +600,7 @@ _DATE = re.compile(
     r"|(?P<kmonth>\d{1,2})\s*월\s*(?P<kday>\d{1,2})(?:\s*일|(?!\s*(?:월|주|차)))"
     r"|(?P<smonth>\d{1,2})\s*[./-]\s*(?P<sday>\d{1,2}))(?!\d)"
 )
-_TIME = re.compile(r"(?:(?P<period>오전|오후)\s*)?(?P<hour>\d{1,2})(?::(?P<minute>\d{2})|\s*시(?:\s*(?P<kminute>\d{1,2})\s*분)?)(?!\d)")
+_TIME = re.compile(r"(?:(?P<period>오전|오후)\s*)?(?P<hour>\d{1,2})(?:\s*:\s*(?P<minute>\d{2})|\s*시(?:\s*(?P<kminute>\d{1,2})\s*분)?)(?!\d)")
 _RELATIVE = re.compile(r"(?:다음\s*주|이번\s*주|금주|차주)\s*[월화수목금토일](?:요일)?|모레|내일|오늘")
 _DATE_LABEL = re.compile(r"^(?:[•·*\-\d.)\s]*)(?:일시|일자|날짜|기간|기한|마감(?:일|기한)?|제출\s*기한|제출일|신청\s*기한|신청\s*마감(?:일)?|접수\s*마감(?:일)?|행사일|실시일)(?=\s|[:：]|$|\d)\s*[:：]?\s*")
 _METADATA = re.compile(r"(?:작성\s*(?:일|일자)|문서\s*작성일|게시일|발행일|등록일|시행일자)\s*[:：]?")
@@ -616,6 +616,18 @@ _MONTH_RANGE = re.compile(
 )
 _MONTH_LABEL = re.compile(r"^(?:시기|평가\s*시기|실시\s*시기|평가월|일정월|월|월별|일정|날짜|일자|기간)\s*[:：]?\s*")
 _MONTH_METADATA = re.compile(r"^(?:작성|발행|게시|등록|수정|출력|다운로드)\s*(?:일자|일시|일|월)?(?=\s|[:：]|$)\s*[:：]?")
+
+
+def _date_matches(text: str) -> list[re.Match]:
+    """Keep clock ranges from supplying fragments that look like dates.
+
+    For example, the short-date expression also matches ``00-19`` inside
+    ``15:00-19:00``. A clock token is stronger evidence at that position;
+    excluding overlapping matches also keeps the whole sentence together.
+    """
+    times = [match.span() for match in _TIME.finditer(text)]
+    return [match for match in _DATE.finditer(text)
+            if not any(start < match.end() and match.start() < end for start, end in times)]
 
 
 def _month_dates(line: str, date_matches: list[re.Match], year: int) -> tuple[list[str], str]:
@@ -687,7 +699,7 @@ def _month_title(lines: list[str], index: int, clean_line: str, source: str, mon
     for prior in reversed(lines[max(0, index - 6):index]):
         if not prior:
             break
-        if _DATE.search(prior) or _MONTH.search(prior) or _MONTH_RANGE.search(prior):
+        if _date_matches(prior) or _MONTH.search(prior) or _MONTH_RANGE.search(prior):
             continue
         title = _month_clean_title(prior)
         if title != "표" and _looks_title(title) and not re.match(r"^(?:교과|단원|평가내용|평가 내용|시기|평가 시기)(?:\s*[|:]|$)", title):
@@ -697,8 +709,9 @@ def _month_title(lines: list[str], index: int, clean_line: str, source: str, mon
 
 
 def _line_title(line: str) -> str:
-    title = _DATE.sub("", line)
-    title = _TIME.sub("", title)
+    # Remove complete clock tokens before the date cleaner can consume the
+    # middle of a clock range as a short numeric date.
+    title = _DATE.sub("", _TIME.sub("", line))
     title = re.sub(r"\([월화수목금토일](?:요일)?\)|[월화수목금토일]요일", "", title)
     title = _PLACE.sub("", title)
     title = _DATE_LABEL.sub("", title)
@@ -736,7 +749,7 @@ def _title_for_line(lines: list[str], index: int, segment: str, *,
     if "|" in segment or "\t" in segment:
         columns = re.split(r"[|\t]", segment)
         for column in columns:
-            if not _DATE.search(column) and not _TIME.search(column):
+            if not _date_matches(column) and not _TIME.search(column):
                 clean = _line_title(column)
                 if _looks_title(clean):
                     return clean
@@ -753,7 +766,7 @@ def _title_for_line(lines: list[str], index: int, segment: str, *,
         if not prior:
             break
         clean = _line_title(prior)
-        if _DATE.search(prior):
+        if _date_matches(prior):
             if not clean:
                 continue
             break
@@ -819,7 +832,7 @@ def parse_schedule_text(text: str, source: str = "", reference_date: date | str 
                         events.append(candidate)
                         seen.add(fingerprint)
                 continue
-        matches = list(_DATE.finditer(line))
+        matches = _date_matches(line)
         if _METADATA.search(line) and not re.search(r"행사|회의|연수|제출|마감|신청|접수|교육|일정", line):
             continue
         months, month_clean = _month_dates(line, matches, month_year)
@@ -827,7 +840,7 @@ def parse_schedule_text(text: str, source: str = "", reference_date: date | str 
             month_context: list[str] = []
             if "|" not in line and "\t" not in line:
                 for following in lines[index + 1:index + 5]:
-                    if not following or _DATE.search(following) or _MONTH.search(following) or _MONTH_RANGE.search(following):
+                    if not following or _date_matches(following) or _MONTH.search(following) or _MONTH_RANGE.search(following):
                         break
                     month_context.append(following)
             context = "\n".join([line] + month_context)
@@ -872,7 +885,7 @@ def parse_schedule_text(text: str, source: str = "", reference_date: date | str 
             continue
         context_after: list[str] = []
         for following in lines[index + 1:index + 5]:
-            if not following or _DATE.search(following):
+            if not following or _date_matches(following):
                 break
             context_after.append(following)
         context = "\n".join([line] + context_after)
@@ -898,7 +911,7 @@ def parse_schedule_text(text: str, source: str = "", reference_date: date | str 
             if cursor + 1 < len(matches):
                 next_match = matches[cursor + 1]
                 connector = line[match.end():next_match.start()].strip()
-                if re.fullmatch(r"(?:\([월화수목금토일](?:요일)?\))?\s*(?:~|∼|–|—|-|부터)\s*", connector):
+                if re.fullmatch(r"\.?\s*(?:\([월화수목금토일](?:요일)?\))?\s*(?:~|∼|–|—|-|부터)\s*", connector):
                     end_year = int(next_match["year"] or year)
                     end_month = int(next_match["month"] or next_match["kmonth"] or next_match["smonth"])
                     end_day = int(next_match["day"] or next_match["kday"] or next_match["sday"])
@@ -912,7 +925,7 @@ def parse_schedule_text(text: str, source: str = "", reference_date: date | str 
                     range_end = next_match.end()
                     cursor += 1
             tail = line[match.end():]
-            weekday = re.match(r"\s*[.(\[]?\s*([월화수목금토일])(?:요일)?\s*[)\]]", tail)
+            weekday = re.match(r"\s*\.?\s*[(\[]?\s*([월화수목금토일])(?:요일)?\s*[)\]]", tail)
             if not weekday:
                 weekday = re.match(r"\s*([월화수목금토일])요일", tail)
             if weekday and parsed and _WEEKDAY[parsed.weekday()] != weekday.group(1):
@@ -927,7 +940,7 @@ def parse_schedule_text(text: str, source: str = "", reference_date: date | str 
             place = place_match.group(1).strip() if place_match else ""
             if not place and ("|" in line or "\t" in line):
                 columns = [column.strip() for column in re.split(r"[|\t]", line) if column.strip()]
-                if len(columns) >= 3 and not _DATE.search(columns[-1]) and not _TIME.search(columns[-1]):
+                if len(columns) >= 3 and not _date_matches(columns[-1]) and not _TIME.search(columns[-1]):
                     place = re.sub(r"^장소\s*[:：]?\s*", "", columns[-1])
             when = _extract_time(segment)
             if not when:
