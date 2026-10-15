@@ -2367,13 +2367,22 @@ def smoke_test(app, window, store, report_path: Path):
                 report["checks"]["calendar_image_preserves_academic_year_month_counts"] = {
                     month: sum(event.start_date.startswith(month + "-") for event in calendar_plan)
                     for month in calendar_reference["month_counts"]} == calendar_reference["month_counts"]
-                report["checks"]["calendar_image_preserves_year_crossing_periods"] = sum(
-                    event.start_date == "2022-12-22" and event.end_date in ("2023-01-11", "2023-02-28")
-                    for event in calendar_plan) == 2
-                report["checks"]["calendar_image_omits_publication_date_and_preserves_dated_milestones"] = (
-                    not any(event.start_date.startswith("2021-") or event.date_precision == "month"
-                            for event in calendar_plan) and
-                    any(event.start_date == "2022-04-07" and "수업일수" in event.title for event in calendar_plan))
+                report["checks"]["calendar_image_preserves_year_crossing_periods"] = (
+                    sorted((event.start_date, event.end_date) for event in calendar_plan
+                           if event.end_date and event.start_date[:4] != event.end_date[:4]) ==
+                    sorted((event["start"], event["end"]) for event in calendar_reference["events"]
+                           if event.get("end") and event["start"][:4] != event["end"][:4]))
+                if calendar_reference.get("table_kind") == "semester":
+                    report["checks"]["semester_table_preserves_each_row_title"] = (
+                        sorted((event.start_date, event.end_date or "", re.sub(r"\s+", "", event.title))
+                               for event in calendar_plan) ==
+                        sorted((event["start"], event.get("end") or "", re.sub(r"\s+", "", event["full_title"]))
+                               for event in calendar_reference["events"]))
+                else:
+                    report["checks"]["calendar_image_omits_publication_date_and_preserves_dated_milestones"] = (
+                        not any(event.start_date.startswith("2021-") or event.date_precision == "month"
+                                for event in calendar_plan) and
+                        any(event.start_date == "2022-04-07" and "수업일수" in event.title for event in calendar_plan))
             else:
                 report["checks"]["calendar_image_preserves_document_year_and_months"] = (
                     all(event.start_date.startswith("2021-") and event.date_precision == "day" for event in calendar_plan) and

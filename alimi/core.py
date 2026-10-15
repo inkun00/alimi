@@ -997,6 +997,56 @@ def _title_for_line(lines: list[str], index: int, segment: str, *,
     return "제목 확인 필요"
 
 
+def _semester_table_header(columns: list[str]) -> tuple[int, int, int] | None:
+    """Require explicit semester columns before interpreting a date matrix."""
+    labels = [_normal(value) for value in columns]
+    if len(labels) != 3:
+        return None
+    title_labels = {"구분", "행사", "행사명", "일정명"}
+    first = [i for i, value in enumerate(labels) if value in {"1학기", "제1학기"}]
+    second = [i for i, value in enumerate(labels) if value in {"2학기", "제2학기"}]
+    title = [i for i, value in enumerate(labels) if value in title_labels]
+    if len(first) == len(second) == len(title) == 1:
+        return title[0], first[0], second[0]
+    return None
+
+
+def _semester_cell_event(cell: str, title: str, *, year: int | None,
+                         academic_year: int | None, reference_year: int,
+                         source: str, source_text: str) -> Event | None:
+    """Read one proved semester cell, without parsing numbers in its title.
+
+    Two-digit years are accepted only inside this explicitly labelled date
+    matrix. This keeps ordinary numbers and unit identifiers out of the
+    general date parser. Empty/slashed cells mean no event for that semester.
+    """
+    if not cell or re.fullmatch(r"[\s./\\~∼–—−\-]+", cell) or _normal(cell) in {"없음", "해당없음", "-"}:
+        return None
+    expanded = re.sub(
+        r"(?<![\d.])['‘’ʼ]?\s*(\d{2})\s*\.\s*(\d{1,2})\s*\.\s*(\d{1,2})(?!\d)",
+        lambda match: f"{2000 + int(match[1])}.{match[2]}.{match[3]}", cell)
+    first = _calendar_date_token(expanded + " ", 0)
+    if first is None or first[1] is None:
+        return Event(title=title or "제목 확인 필요", source=source, source_text=source_text,
+                     status="review", notes="확인 필요: 학기별 일정의 날짜를 명확히 읽지 못했습니다. 원문을 확인해 주세요.")
+    connector = _CALENDAR_RANGE.match(expanded, first[-1])
+    second = _calendar_date_token(expanded + " ", connector.end(), allow_comma=True) if connector else None
+    end = second[-1] if second is not None else first[-1]
+    context_year = (academic_year + (first[1] < 3) if academic_year is not None else year)
+    event, _ = _calendar_event(expanded + " " + (title or "일정"), (first, second, title or "일정"),
+                               context_year, first[1], reference_year, source, False)
+    event.title = title or "제목 확인 필요"
+    event.source_text = source_text
+    if expanded[end:].strip(" \t."):
+        event.status = "review"
+        detail = "확인 필요: 학기별 날짜 셀에 명확히 읽지 못한 내용이 있습니다. 원문을 확인해 주세요."
+        event.notes = "\n".join(value for value in (event.notes, detail) if value)
+    if not title:
+        event.status = "review"
+        event.notes = "\n".join(value for value in (event.notes, "확인 필요: 일정 제목을 확인해 주세요.") if value)
+    return event
+
+
 def parse_schedule_text(text: str, source: str = "", reference_date: date | str | None = None, *,
                         _preserve_date_words: bool = True) -> list[Event]:
     """Extract dated candidates, never fabricate a date for invalid/relative text.
@@ -1034,13 +1084,17 @@ def parse_schedule_text(text: str, source: str = "", reference_date: date | str 
     assessment_time_column: int | None = None
     period_columns: list[str] | None = None
     period_indexes: tuple[int, int, int] | None = None
+    semester_indexes: tuple[int, int, int] | None = None
+    semester_header = ""
     calendar_continuations: set[int] = set()
     for index, line in enumerate(lines):
         if not line:
+            semester_indexes = None
             continue
         if re.fullmatch(r"\[[^\[\]]+\]", line):
             period_columns = None
             period_indexes = None
+            semester_indexes = None
         if index in calendar_headers or index in calendar_continuations:
             continue
         if index < calendar_preamble_end:
@@ -1096,10 +1150,56 @@ def parse_schedule_text(text: str, source: str = "", reference_date: date | str 
             spaced_columns = re.split(r"\s{2,}", line)
             spaced_labels = {_normal(value) for value in spaced_columns}
             if ((period_columns is not None and len(spaced_columns) == len(period_columns))
+                    or (semester_indexes is not None and len(spaced_columns) == 3)
+                    or _semester_table_header(spaced_columns) is not None
                     or ({"시작일", "종료일"} <= spaced_labels and len(spaced_columns) >= 3)):
                 line = "\t".join(spaced_columns)
+            else:
+                semester_indexes = None
         if "|" in line or "\t" in line:
             table_columns = [column.strip() for column in re.split(r"[|\t]", line)]
+            semester_cells = list(table_columns)
+            if line.startswith("|") and not semester_cells[0]:
+                semester_cells.pop(0)
+            if line.endswith("|") and not semester_cells[-1]:
+                semester_cells.pop()
+            new_semester_indexes = _semester_table_header(semester_cells)
+            if new_semester_indexes is not None:
+                semester_indexes = new_semester_indexes
+                semester_header = "\t".join(semester_cells)
+                period_columns = period_indexes = None
+                assessment_columns = assessment_time_column = None
+                continue
+            if semester_indexes is not None:
+                # A trailing blank cell may be omitted by document readers.
+                # Only the established matrix header supplies that position.
+                if 1 < len(semester_cells) < 3:
+                    semester_cells.extend([""] * (3 - len(semester_cells)))
+                if len(semester_cells) == 3:
+                    if all(re.fullmatch(r"[:\-\s]+", value) for value in semester_cells):
+                        continue
+                    title_index, first_index, second_index = semester_indexes
+                    # A different table's explicit headers end this matrix.
+                    labels = [_normal(value) for value in semester_cells]
+                    general_headers = {"기간", "내용", "장소", "시간", "제목", "일정명", "행사명", "비고"}
+                    if (any(value in {"날짜", "일자", "일시", "시작일", "종료일", "평가시기", "평가내용"}
+                            for value in labels)
+                            or sum(value in general_headers for value in labels) >= 2):
+                        semester_indexes = None
+                    else:
+                        context = f"{explicit_year}학년도\n" if academic_year else f"{explicit_year}년\n" if explicit_year else ""
+                        context += semester_header + "\n" + original_table_line
+                        for cell_index in (first_index, second_index):
+                            candidate = _semester_cell_event(
+                                semester_cells[cell_index], semester_cells[title_index], year=explicit_year,
+                                academic_year=int(academic_year.group(1)) if academic_year else None,
+                                reference_year=reference.year, source=source, source_text=context)
+                            if candidate is not None and _fingerprint(candidate) not in seen:
+                                events.append(candidate)
+                                seen.add(_fingerprint(candidate))
+                        continue
+                else:
+                    semester_indexes = None
             normalized_columns = [_normal(column) for column in table_columns]
             start_headers = {"시작일", "시작일자", "시작날짜", "개시일"}
             end_headers = {"종료일", "종료일자", "종료날짜", "마지막날짜"}

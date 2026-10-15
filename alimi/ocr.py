@@ -257,6 +257,103 @@ def _calendar_rows_text(fragments, *, join_continuations=False):
     return "\n".join(lines)
 
 
+_SEMESTER_HEADING = re.compile(r"(?:제\s*)?([1-9])\s*학기")
+_SEMESTER_DATE = re.compile(r"^[^\w가-힣]*(?:(?:19|20)\d{2}\s*[년./]\s*)?"
+                            r"\d{1,2}\s*[./월]\s*\d{1,2}")
+_SEMESTER_LABEL = re.compile(r"(?:구분|행사(?:명)?|일정(?:명)?|학사\s*일정)")
+
+
+@dataclass(frozen=True)
+class _SemesterTable:
+    headers: tuple[_TextFragment, ...]
+    boundaries: tuple[float, ...]
+    rows: tuple[tuple[tuple[_TextFragment, ...], ...], ...]
+    row_edges: tuple[float, ...]
+
+
+def _semester_table(fragments, width, height):
+    """Recognize a repeated event/semester matrix from its observable cells.
+
+    The semester headers, a left-hand event header, several aligned date rows
+    and an event label on each row must agree. A normal list or a lone pair of
+    semester labels therefore retains the ordinary document reading path.
+    """
+    semester_rows = _text_rows([item for item in fragments
+                               if _SEMESTER_HEADING.fullmatch(item.text.strip())])
+    for semesters in semester_rows:
+        if len(semesters) != 2:
+            continue
+        numbers = [int(_SEMESTER_HEADING.fullmatch(item.text.strip()).group(1))
+                   for item in semesters]
+        if numbers != [1, 2]:
+            continue
+        labels = [item for item in fragments if _SEMESTER_LABEL.fullmatch(item.text.strip())
+                  and item.right < semesters[0].left
+                  and abs(item.cy - semesters[0].cy) <= min(item.height, semesters[0].height) * .5]
+        if len(labels) != 1:
+            continue
+        headers = [labels[0], *semesters]
+        centers = [(item.left + item.right) / 2 for item in headers]
+        gaps = [b - a for a, b in zip(centers, centers[1:])]
+        if min(gaps) < max(item.height for item in headers) * 1.7:
+            continue
+        edges = [max(0, centers[0] - gaps[0] / 2)]
+        edges.extend((a + b) / 2 for a, b in zip(centers, centers[1:]))
+        edges.append(min(width, centers[-1] + gaps[-1] / 2))
+        header_bottom = max(item.bottom for item in headers)
+        body = [item for item in fragments if item.cy > header_bottom
+                and edges[0] <= (item.left + item.right) / 2 < edges[-1]]
+        dated = [item for item in body if (item.left + item.right) / 2 >= edges[1]
+                 and _SEMESTER_DATE.match(item.text.strip())]
+        dated_rows = _text_rows(dated)
+        if len(dated_rows) < 3 or sum(len(row) > 1 for row in dated_rows) < 2:
+            continue
+        row_centers = [statistics.median(item.cy for item in row) for row in dated_rows]
+        row_gaps = [b - a for a, b in zip(row_centers, row_centers[1:])]
+        if min(row_gaps) <= statistics.median(item.height for item in dated) * .9:
+            continue
+        row_edges = [header_bottom]
+        row_edges.extend((a + b) / 2 for a, b in zip(row_centers, row_centers[1:]))
+        row_edges.append(min(height, row_centers[-1] + statistics.median(row_gaps) / 2))
+        rows = []
+        valid = True
+        for row_index in range(len(dated_rows)):
+            cells = []
+            for column in range(len(headers)):
+                inside = tuple(item for item in body
+                               if row_edges[row_index] <= item.cy < row_edges[row_index + 1]
+                               and edges[column] <= (item.left + item.right) / 2 < edges[column + 1])
+                # Crossing a column edge can mean that OCR combined neighboring
+                # cells; preserve its unmodified text instead of guessing a split.
+                tolerance = (edges[column + 1] - edges[column]) * .1
+                if any(item.left < edges[column] - tolerance
+                       or item.right > edges[column + 1] + tolerance for item in inside):
+                    valid = False
+                cells.append(inside)
+            label = _cell_body_text(cells[0])
+            if not re.search(r"[가-힣A-Za-z]", label) or _SEMESTER_DATE.match(label):
+                valid = False
+            if any(sum(bool(_SEMESTER_DATE.match(item.text.strip())) for item in cell) > 1
+                   for cell in cells[1:]):
+                valid = False
+            rows.append(tuple(cells))
+        if valid:
+            return _SemesterTable(tuple(headers), tuple(edges), tuple(rows), tuple(row_edges))
+    return None
+
+
+def _semester_table_text(fragments, width, height):
+    table = _semester_table(fragments, width, height)
+    if table is None:
+        return None
+    first_top = min(item.top for item in table.headers)
+    preamble = _rows_text([item for item in fragments if item.cy < first_top])
+    lines = [preamble] if preamble else []
+    lines.append("\t".join(item.text.strip() for item in table.headers))
+    lines.extend("\t".join(_cell_body_text(cell) for cell in row) for row in table.rows)
+    return "\n".join(lines)
+
+
 _CELL_MONTH_TITLE = re.compile(
     r"(?:(?P<year>19\d{2}|20\d{2})\s*년\s*)?(?P<month>1[0-2]|0?[1-9])\s*월"
     r"\s*(?:주간\s*일정|주간\s*계획|월간\s*일정|월간\s*계획)")
@@ -572,9 +669,87 @@ class OcrEngine:
                                                float(box[:, 0].max()), float(box[:, 1].max()), text))
         return fragments
 
+    def _semester_cell_text(self, pixels, body, bounds, *, date_cell):
+        """Optionally reread small isolated print, retaining observed numbers."""
+        import cv2
+        original = _cell_body_text(body)
+        if not body or statistics.median(item.height for item in body) >= 26:
+            return original
+        height, width = pixels.shape[:2]
+        cell_left, cell_top, cell_right, cell_bottom = bounds
+        padding = statistics.median(item.height for item in body) * .25
+        left = max(cell_left, min(item.left for item in body) - padding)
+        right = min(cell_right, max(item.right for item in body) + padding)
+        top = max(cell_top, min(item.top for item in body) - padding)
+        bottom = min(cell_bottom, max(item.bottom for item in body) + padding)
+        if date_cell:
+            # Whitespace inside a proved date cell keeps its full date/range in
+            # one detector box, including faint weekday glyphs near the edges.
+            left, top, right, bottom = bounds
+        crop = pixels[max(0, int(top)):min(height, math.ceil(bottom)),
+                      max(0, int(left)):min(width, math.ceil(right))]
+        if min(crop.shape[:2]) < 4:
+            return original
+        result = original
+        old_rows = [" ".join(item.text for item in row) for row in _text_rows(body)]
+        numbers = re.findall(r"\d+", original)
+
+        def weekday_count(text):
+            return len(re.findall(r"[（(]\s*[월화수목금토일]\s*[）)]", text))
+
+        for scale in (2, 3) if date_cell else (2,):
+            if scale == 3 and weekday_count(result) >= max(1, len(re.findall(r"[（(]", result))):
+                break
+            try:
+                import numpy as np
+                from PIL import Image
+                enlarged = np.asarray(Image.fromarray(crop).resize(
+                    (crop.shape[1] * scale, crop.shape[0] * scale), Image.Resampling.LANCZOS))
+                enlarged = cv2.copyMakeBorder(enlarged, 20, 20, 20, 20,
+                                               cv2.BORDER_CONSTANT, value=(255, 255, 255))
+                refined = self._read_fragments(enlarged)
+                new_rows = [" ".join(item.text for item in row) for row in _text_rows(refined)]
+                text = " ".join(new_rows)
+                if (not refined or re.findall(r"\d+", text) != numbers
+                        or len(new_rows) < len(old_rows)):
+                    continue
+                if date_cell:
+                    # Only an observed weekday improves the date crop. Equal
+                    # quality leaves the original numerals and punctuation alone.
+                    if _SEMESTER_DATE.match(text) and weekday_count(text) > weekday_count(result):
+                        result = text
+                elif sum(ch.isalnum() for ch in text) >= sum(ch.isalnum() for ch in original):
+                    if len(new_rows) == len(old_rows):
+                        # Primary labels benefit from isolated recognition. An
+                        # equally long continuation stays unchanged; only a
+                        # newly recovered character justifies replacing it.
+                        text = " ".join(new if index == 0 or sum(ch.isalnum() for ch in new)
+                                        > sum(ch.isalnum() for ch in old) else old
+                                        for index, (old, new) in enumerate(zip(old_rows, new_rows)))
+                    result = text
+            except Exception:
+                # Successfully recognized source cells survive optional failures.
+                continue
+        return result
+
     def _calendar_text(self, pixels, fragments):
         import cv2
         height, width = pixels.shape[:2]
+        table = _semester_table(fragments, width, height)
+        if table is not None:
+            first_top = min(item.top for item in table.headers)
+            preamble = _rows_text([item for item in fragments if item.cy < first_top])
+            lines = [preamble] if preamble else []
+            lines.append("\t".join(item.text.strip() for item in table.headers))
+            for row_index, row in enumerate(table.rows):
+                cells = []
+                for column, original in enumerate(row):
+                    cells.append(self._semester_cell_text(pixels, original,
+                                  (table.boundaries[column], table.row_edges[row_index],
+                                   table.boundaries[column + 1], table.row_edges[row_index + 1]),
+                                  date_cell=column > 0))
+                lines.append("\t".join(cells))
+            return "\n".join(lines)
         cell_text = _weekly_cell_text(fragments, width, height)
         if cell_text is None:
             cell_text = _monthly_cell_text(fragments, width, height)
